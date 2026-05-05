@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Preview — Google Form Booking Room Meeting</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      background: #f0ebf8;
+      min-height: 100vh;
+      padding: 24px 16px 48px;
+    }
+    .container { max-width: 640px; margin: 0 auto; }
+
+    /* Header card */
+    .form-header {
+      background: white;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12);
+      border-top: 10px solid #673ab7;
+    }
+    .form-header-body { padding: 24px; }
+    .form-title { font-size: 28px; font-weight: 400; color: #202124; margin-bottom: 8px; }
+    .form-desc  { font-size: 14px; color: #444746; line-height: 1.6; }
+    .form-required-note { font-size: 13px; color: #c5221f; margin-top: 12px; }
+
+    /* Section label */
+    .section-label {
+      background: white;
+      border-radius: 8px;
+      padding: 16px 24px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12);
+      border-left: 4px solid #673ab7;
+    }
+    .section-label h3 { font-size: 15px; font-weight: 500; color: #673ab7; }
+
+    /* Question card */
+    .question-card {
+      background: white;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12);
+      transition: box-shadow .2s;
+    }
+    .question-card:focus-within { box-shadow: 0 2px 8px rgba(103,58,183,.25); border-left: 3px solid #673ab7; padding-left: 21px; }
+    .question-label {
+      font-size: 15px; font-weight: 400; color: #202124; margin-bottom: 16px; line-height: 1.5;
+    }
+    .question-label .required { color: #c5221f; margin-left: 4px; }
+    .question-hint { font-size: 12px; color: #80868b; margin-top: -10px; margin-bottom: 14px; }
+
+    /* Text input */
+    .g-input {
+      width: 100%; border: none; border-bottom: 1px solid #dadce0;
+      padding: 6px 0; font-size: 14px; color: #202124; outline: none;
+      background: transparent; transition: border-color .2s;
+    }
+    .g-input:focus { border-bottom: 2px solid #673ab7; }
+    .g-input::placeholder { color: #80868b; }
+
+    /* Radio / Checkbox */
+    .option-list { list-style: none; }
+    .option-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 4px; border-radius: 4px; cursor: pointer;
+      transition: background .15s;
+    }
+    .option-item:hover { background: #f8f5ff; }
+    .option-item input[type=radio],
+    .option-item input[type=checkbox] {
+      width: 18px; height: 18px; accent-color: #673ab7; flex-shrink: 0; cursor: pointer;
+    }
+    .option-item label { font-size: 14px; color: #202124; cursor: pointer; flex: 1; }
+
+    /* Date / Time */
+    .datetime-row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .datetime-group { flex: 1; min-width: 140px; }
+    .datetime-group label { font-size: 12px; color: #80868b; display: block; margin-bottom: 4px; }
+    .g-date, .g-time {
+      width: 100%; border: 1px solid #dadce0; border-radius: 4px;
+      padding: 8px 10px; font-size: 14px; color: #202124; outline: none;
+      transition: border-color .2s;
+    }
+    .g-date:focus, .g-time:focus { border-color: #673ab7; box-shadow: 0 0 0 2px rgba(103,58,183,.15); }
+
+    /* Textarea */
+    .g-textarea {
+      width: 100%; border: none; border-bottom: 1px solid #dadce0;
+      padding: 6px 0; font-size: 14px; color: #202124; outline: none;
+      resize: none; background: transparent; transition: border-color .2s;
+      min-height: 60px;
+    }
+    .g-textarea:focus { border-bottom: 2px solid #673ab7; }
+
+    /* Submit button */
+    .form-footer {
+      display: flex; justify-content: space-between; align-items: center;
+      background: white; border-radius: 8px; padding: 16px 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.12); margin-top: 12px;
+    }
+    .btn-submit {
+      background: #673ab7; color: white; border: none;
+      padding: 10px 24px; border-radius: 4px; font-size: 14px;
+      font-weight: 500; cursor: pointer; letter-spacing: .25px;
+      transition: background .2s, box-shadow .2s;
+    }
+    .btn-submit:hover { background: #5e35b1; box-shadow: 0 2px 6px rgba(103,58,183,.4); }
+    .btn-clear { font-size: 14px; color: #673ab7; cursor: pointer; background: none; border: none; padding: 10px; }
+    .btn-clear:hover { text-decoration: underline; }
+
+    /* Preview badge */
+    .preview-badge {
+      background: #e8f0fe; border: 1px solid #d2e3fc; border-radius: 8px;
+      padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #1a73e8;
+      display: flex; align-items: flex-start; gap-8: 8px;
+    }
+    .preview-badge strong { display: block; margin-bottom: 2px; }
+
+    /* Step guide */
+    .guide-section {
+      background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px;
+      padding: 16px 20px; margin-bottom: 20px; font-size: 13px; color: #5d4037;
+    }
+    .guide-section h4 { font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #e65100; }
+    .guide-section ol { padding-left: 18px; line-height: 2; }
+
+    /* Tag chip */
+    .chip {
+      display: inline-block; background: #ede7f6; color: #4527a0;
+      border-radius: 12px; padding: 2px 10px; font-size: 12px; margin: 2px;
+    }
+
+    /* Divider */
+    .divider { border: none; border-top: 1px solid #e0e0e0; margin: 8px 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Preview notice -->
+  <div class="preview-badge" style="background:#e8f0fe;border:1px solid #d2e3fc;border-radius:8px;padding:12px 16px;margin-bottom:20px;font-size:13px;color:#1a73e8;display:flex;gap:10px;">
+    <span style="font-size:20px">ℹ️</span>
+    <div>
+      <strong>Ini adalah PREVIEW visual Google Form</strong>
+      Gunakan file <code>google-form-apps-script.gs</code> untuk membuat form nyata di Google, dan <code>booking-form-connector.js</code> untuk menghubungkannya ke RoomBook API.
+    </div>
+  </div>
+
+  <!-- Setup guide -->
+  <div class="guide-section">
+    <h4>🚀 Cara Setup (3 Langkah)</h4>
+    <ol>
+      <li><strong>Buat Google Form</strong> di <a href="https://forms.google.com" target="_blank" style="color:#e65100">forms.google.com</a> dengan field sesuai preview di bawah</li>
+      <li><strong>Pasang Apps Script</strong> — buka form → ⋮ → Script editor → paste isi file <code>google-form-apps-script.gs</code></li>
+      <li><strong>Set trigger</strong> — di Apps Script → Triggers → On form submit → jalankan fungsi <code>onFormSubmit</code></li>
+    </ol>
+  </div>
+
+  <!-- Form Header -->
+  <div class="form-header">
+    <div class="form-header-body">
+      <div class="form-title">📅 Booking Room Meeting — Majoo</div>
+      <hr class="divider" style="margin: 12px 0;">
+      <div class="form-desc">
+        Isi form ini untuk memesan ruang meeting. Pastikan Anda login dengan akun <strong>@majoo.id</strong>.<br><br>
+        Booking akan otomatis masuk ke sistem RoomBook. Konfirmasi akan dikirim ke email Anda.
+      </div>
+      <div class="form-required-note">* Wajib diisi</div>
+    </div>
+  </div>
+
+  <!-- SECTION 1: Identitas -->
+  <div class="section-label">
+    <h3>👤 Identitas Pemohon</h3>
+  </div>
+
+  <!-- Nama Lengkap -->
+  <div class="question-card">
+    <div class="question-label">Nama Lengkap <span class="required">*</span></div>
+    <input class="g-input" type="text" placeholder="Nama lengkap Anda" />
+  </div>
+
+  <!-- Email -->
+  <div class="question-card">
+    <div class="question-label">Email Majoo <span class="required">*</span></div>
+    <div class="question-hint">Gunakan email @majoo.id Anda. Konfirmasi booking akan dikirim ke sini.</div>
+    <input class="g-input" type="email" placeholder="nama@majoo.id" />
+  </div>
+
+  <!-- Departemen -->
+  <div class="question-card">
+    <div class="question-label">Departemen / Tim <span class="required">*</span></div>
+    <ul class="option-list">
+      <li class="option-item"><input type="radio" name="dept" id="d1"><label for="d1">Product</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d2"><label for="d2">Engineering</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d3"><label for="d3">Design</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d4"><label for="d4">Marketing</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d5"><label for="d5">Sales</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d6"><label for="d6">HR & GA</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d7"><label for="d7">Finance</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d8"><label for="d8">Operations</label></li>
+      <li class="option-item"><input type="radio" name="dept" id="d9"><label for="d9">Lainnya</label></li>
+    </ul>
+  </div>
+
+  <!-- SECTION 2: Detail Meeting -->
+  <div class="section-label">
+    <h3>📋 Detail Meeting</h3>
+  </div>
+
+  <!-- Nama Meeting -->
+  <div class="question-card">
+    <div class="question-label">Nama / Judul Meeting <span class="required">*</span></div>
+    <input class="g-input" type="text" placeholder="cth. Sprint Planning Q3, Interview Kandidat, dll." />
+  </div>
+
+  <!-- Pilih Room -->
+  <div class="question-card">
+    <div class="question-label">Pilih Ruang Meeting <span class="required">*</span></div>
+    <div class="question-hint">Cek ketersediaan room di aplikasi RoomBook sebelum memilih.</div>
+    <ul class="option-list">
+      <li class="option-item">
+        <input type="radio" name="room" id="r1">
+        <label for="r1">
+          <strong>Raja Ampat</strong>
+          <span style="font-size:12px;color:#80868b;display:block">Kapasitas 7 orang · 📺 TV · 📋 Whiteboard</span>
+        </label>
+      </li>
+      <li class="option-item">
+        <input type="radio" name="room" id="r2">
+        <label for="r2">
+          <strong>Bromo</strong>
+          <span style="font-size:12px;color:#80868b;display:block">Kapasitas 9 orang · 📺 TV · 📋 Whiteboard · 🎥 Camera Conference</span>
+        </label>
+      </li>
+      <li class="option-item">
+        <input type="radio" name="room" id="r3">
+        <label for="r3">
+          <strong>Tegallalang</strong>
+          <span style="font-size:12px;color:#80868b;display:block">Kapasitas 6 orang · 📺 TV · 📋 Whiteboard · 🎥 Camera Conference</span>
+        </label>
+      </li>
+      <li class="option-item">
+        <input type="radio" name="room" id="r4">
+        <label for="r4">
+          <strong>Tanjung Tinggi</strong>
+          <span style="font-size:12px;color:#80868b;display:block">Kapasitas 6 orang · 📺 TV · 📋 Whiteboard</span>
+        </label>
+      </li>
+    </ul>
+  </div>
+
+  <!-- SECTION 3: Jadwal -->
+  <div class="section-label">
+    <h3>🗓 Jadwal</h3>
+  </div>
+
+  <!-- Tanggal -->
+  <div class="question-card">
+    <div class="question-label">Tanggal Meeting <span class="required">*</span></div>
+    <div class="datetime-row">
+      <div class="datetime-group">
+        <label>Pilih tanggal</label>
+        <input class="g-date" type="date" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Waktu -->
+  <div class="question-card">
+    <div class="question-label">Waktu Mulai <span class="required">*</span></div>
+    <div class="question-hint">Jam operasional: 08:00 – 20:00</div>
+    <div class="datetime-row">
+      <div class="datetime-group">
+        <label>Jam mulai</label>
+        <select class="g-date" style="cursor:pointer">
+          <option value="">-- Pilih jam --</option>
+          <option>08:00</option><option>08:30</option>
+          <option>09:00</option><option>09:30</option>
+          <option>10:00</option><option>10:30</option>
+          <option>11:00</option><option>11:30</option>
+          <option>12:00</option><option>12:30</option>
+          <option>13:00</option><option>13:30</option>
+          <option>14:00</option><option>14:30</option>
+          <option>15:00</option><option>15:30</option>
+          <option>16:00</option><option>16:30</option>
+          <option>17:00</option><option>17:30</option>
+          <option>18:00</option><option>18:30</option>
+          <option>19:00</option><option>19:30</option>
+          <option>20:00</option>
+        </select>
+      </div>
+      <div class="datetime-group">
+        <label>Jam selesai</label>
+        <select class="g-date" style="cursor:pointer">
+          <option value="">-- Pilih jam --</option>
+          <option>08:30</option>
+          <option>09:00</option><option>09:30</option>
+          <option>10:00</option><option>10:30</option>
+          <option>11:00</option><option>11:30</option>
+          <option>12:00</option><option>12:30</option>
+          <option>13:00</option><option>13:30</option>
+          <option>14:00</option><option>14:30</option>
+          <option>15:00</option><option>15:30</option>
+          <option>16:00</option><option>16:30</option>
+          <option>17:00</option><option>17:30</option>
+          <option>18:00</option><option>18:30</option>
+          <option>19:00</option><option>19:30</option>
+          <option>20:00</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 4: Peserta & Info Tambahan -->
+  <div class="section-label">
+    <h3>👥 Peserta & Info Tambahan</h3>
+  </div>
+
+  <!-- Jumlah peserta -->
+  <div class="question-card">
+    <div class="question-label">Jumlah Peserta <span class="required">*</span></div>
+    <ul class="option-list">
+      <li class="option-item"><input type="radio" name="pax" id="p1"><label for="p1">1 – 2 orang</label></li>
+      <li class="option-item"><input type="radio" name="pax" id="p2"><label for="p2">3 – 4 orang</label></li>
+      <li class="option-item"><input type="radio" name="pax" id="p3"><label for="p3">5 – 6 orang</label></li>
+      <li class="option-item"><input type="radio" name="pax" id="p4"><label for="p4">7 – 9 orang</label></li>
+    </ul>
+  </div>
+
+  <!-- Nama peserta -->
+  <div class="question-card">
+    <div class="question-label">Nama Peserta</div>
+    <div class="question-hint">Pisahkan dengan koma. cth: Zulfikar, Firjayanti, Tim Product</div>
+    <textarea class="g-textarea" placeholder="Nama-nama peserta..."></textarea>
+  </div>
+
+  <!-- Fasilitas -->
+  <div class="question-card">
+    <div class="question-label">Fasilitas yang Dibutuhkan</div>
+    <ul class="option-list">
+      <li class="option-item"><input type="checkbox" id="f1"><label for="f1">📺 TV / Display Screen</label></li>
+      <li class="option-item"><input type="checkbox" id="f2"><label for="f2">📋 Whiteboard</label></li>
+      <li class="option-item"><input type="checkbox" id="f3"><label for="f3">🎥 Camera Conference (Video Call)</label></li>
+    </ul>
+  </div>
+
+  <!-- Catatan -->
+  <div class="question-card">
+    <div class="question-label">Catatan Tambahan</div>
+    <div class="question-hint">Kebutuhan khusus, persiapan ruangan, dll.</div>
+    <textarea class="g-textarea" placeholder="Catatan opsional..."></textarea>
+  </div>
+
+  <!-- Submit footer -->
+  <div class="form-footer">
+    <button class="btn-clear" type="button">Hapus isian</button>
+    <button class="btn-submit" type="button">Kirim Booking →</button>
+  </div>
+
+  <!-- Footer info -->
+  <p style="text-align:center;font-size:12px;color:#80868b;margin-top:20px;">
+    Setelah submit, data otomatis masuk ke sistem RoomBook via Google Apps Script.<br>
+    Konfirmasi booking akan dikirim ke email @majoo.id Anda.
+  </p>
+
+</div>
+</body>
+</html>
