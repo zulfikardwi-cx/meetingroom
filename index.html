@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RoomBook — Meeting Room Booking Majoo</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+  <style>
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+    .fade-in { animation: fadeIn 0.25s ease forwards; }
+    .otp-input { letter-spacing: 0.3em; font-size: 1.5rem; text-align: center; font-weight: 700; }
+  </style>
+  <style>
+    body { font-family: 'Inter', 'Segoe UI', sans-serif; }
+    .booking-chip { font-size: 11px; line-height: 1.3; }
+    .time-slot:hover { background-color: #f0f9ff; cursor: pointer; }
+    .modal-overlay { backdrop-filter: blur(2px); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    @keyframes slideIn  { from { transform:translateX(120%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+    @keyframes slideOut { from { transform:translateX(0); opacity:1; } to { transform:translateX(120%); opacity:0; } }
+    .toast-in  { animation: slideIn  0.3s ease forwards; }
+    .toast-out { animation: slideOut 0.3s ease forwards; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<div id="root"></div>
+
+<script>
+// ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
+const SUPA_URL  = "https://zstapiekxjzoghxpxeqq.supabase.co";
+const SUPA_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzdGFwaWVreGp6b2doeHB4ZXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMzQzNzAsImV4cCI6MjA5MzcxMDM3MH0.sRVNhhgmucFTGiLMRVZHbB3d5GtZOXT2kmpfgKi6sjE";
+
+const supa = {
+  headers: { "apikey": SUPA_KEY, "Authorization": "Bearer " + SUPA_KEY, "Content-Type": "application/json", "Prefer": "return=representation" },
+
+  async get(table, params) {
+    const q = params ? "?" + new URLSearchParams(params) : "";
+    const r = await fetch(`${SUPA_URL}/rest/v1/${table}${q}`, { headers: this.headers });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+
+  async insert(table, data) {
+    const r = await fetch(`${SUPA_URL}/rest/v1/${table}`, {
+      method: "POST", headers: this.headers, body: JSON.stringify(data)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+
+  async update(table, id, data) {
+    const r = await fetch(`${SUPA_URL}/rest/v1/${table}?id=eq.${id}`, {
+      method: "PATCH", headers: this.headers, body: JSON.stringify(data)
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+
+  async delete(table, id) {
+    const r = await fetch(`${SUPA_URL}/rest/v1/${table}?id=eq.${id}`, {
+      method: "DELETE", headers: this.headers
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return true;
+  },
+
+  // Realtime subscription via SSE
+  subscribe(table, callback) {
+    const url = `${SUPA_URL}/realtime/v1/sse?apikey=${SUPA_KEY}&channel=realtime:public:${table}`;
+    const es = new EventSource(url);
+    es.onmessage = e => { try { callback(JSON.parse(e.data)); } catch {} };
+    return es;
+  }
+};
+
+// Session helpers
+function loadSession() {
+  try {
+    const u = JSON.parse(localStorage.getItem("roombook_session_v2")||"null");
+    if (u) u.photo = localStorage.getItem("roombook_photo_" + u.id) || u.photo || "";
+    return u;
+  } catch { return null; }
+}
+function saveSession(u) { try { if(u) localStorage.setItem("roombook_session_v2", JSON.stringify(u)); else localStorage.removeItem("roombook_session_v2"); } catch {} }
+
+// ─── EMAILJS CONFIG ───────────────────────────────────────────────────────────
+const EJS_SERVICE  = "service_5n5brt4";
+const EJS_OTP_TPL  = "template_ex9cxwq"; // template OTP registrasi
+const EJS_RESET_TPL = "template_f976i2p"; // template link reset password
+const EJS_PUBLIC   = "mhdwmiaqTOGHBVnfX";
+window.addEventListener("DOMContentLoaded", () => { emailjs.init({ publicKey: EJS_PUBLIC }); });
+const BASE_URL     = "https://meetingroom.majoo.id"; // base URL custom domain
+
+// OTP store (in-memory)
+const _otpStore = {};
+function generateOTP() { return String(Math.floor(100000 + Math.random() * 900000)); }
+function storeOTP(email, code) { _otpStore[email] = { code, exp: Date.now() + 5*60*1000 }; }
+function verifyOTP(email, code) {
+  const rec = _otpStore[email];
+  if (!rec) return "not_found";
+  if (Date.now() > rec.exp) { delete _otpStore[email]; return "expired"; }
+  if (rec.code !== code) return "wrong";
+  delete _otpStore[email];
+  return "ok";
+}
+async function sendOTPEmail(toName, toEmail, otpCode) {
+  await emailjs.send(EJS_SERVICE, EJS_OTP_TPL, {
+    to_name:  toName,
+    to_email: toEmail,
+    otp_code: otpCode,
+  });
+}
+
+async function sendResetEmail(toName, toEmail, resetLink) {
+  const res = await emailjs.send(EJS_SERVICE, EJS_RESET_TPL, {
+    to_name: toName,
+    email:   toEmail,
+    link:    resetLink,
+  });
+  console.log("EmailJS reset response:", res);
+  if (res.status !== 200) throw new Error("EmailJS status " + res.status + ": " + res.text);
+}
+async function createResetToken(email) {
+  // Hapus token lama untuk email ini
+  const old = await supa.get("password_resets", { email: `eq.${email}`, used: "eq.false" });
+  for (const r of old) {
+    await fetch(`${SUPA_URL}/rest/v1/password_resets?token=eq.${r.token}`, {
+      method: "DELETE",
+      headers: { "apikey": SUPA_KEY, "Authorization": "Bearer " + SUPA_KEY }
+    });
+  }
+  // Buat token baru
+  const token = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).slice(2) + Date.now().toString(36));
+  const expiresAt = new Date(Date.now() + 30*60*1000).toISOString(); // 30 menit
+  await supa.insert("password_resets", { token, email, expires_at: expiresAt, used: false });
+  return token;
+}
+</script>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useCallback, useRef } = React;
+
+// ─── MASTER DATA ──────────────────────────────────────────────────────────────
+const ROOMS = [
+  { id: 1, name: "Raja Ampat",     capacity: 7, colorHex: "#3b82f6", facilities: ["TV","Whiteboard"] },
+  { id: 2, name: "Bromo",          capacity: 9, colorHex: "#10b981", facilities: ["TV","Whiteboard","Camera Conference"] },
+  { id: 3, name: "Tegallalang",    capacity: 6, colorHex: "#8b5cf6", facilities: ["TV","Whiteboard","Camera Conference"] },
+  { id: 4, name: "Tanjung Tinggi", capacity: 6, colorHex: "#f59e0b", facilities: ["TV","Whiteboard"] },
+];
+const ADMIN_EMAILS = ["zulfikar.dwi@majoo.id", "firjayanti@majoo.id"];
+const FACILITY_ICONS = { "TV": "📺", "Whiteboard": "📋", "Camera Conference": "🎥" };
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth()+1).padStart(2,"0");
+  const dd = String(d.getDate()).padStart(2,"0");
+  return `${y}-${mo}-${dd}`;
+}
+function todayStr() { return localDateStr(new Date()); }
+function toMin(t) { const [h,m] = t.split(":").map(Number); return h*60+m; }
+function addHour(t) { const [h,m] = t.split(":").map(Number); return `${String(Math.min(h+1,20)).padStart(2,"0")}:${String(m).padStart(2,"0")}`; }
+function fmtMonthYear(d) { return d.toLocaleDateString("id-ID",{month:"long",year:"numeric"}); }
+function getWeekDays(base) {
+  const d = new Date(base), mon = new Date(d), day = d.getDay();
+  mon.setDate(d.getDate()-(day===0?6:day-1));
+  return Array.from({length:7},(_,i)=>{ const dd=new Date(mon); dd.setDate(mon.getDate()+i); return dd; });
+}
+const HOURS = Array.from({length:13},(_,i)=>`${String(i+8).padStart(2,"0")}:00`);
+
+function findConflict(bookings, candidate) {
+  const cS = toMin(candidate.start_time), cE = toMin(candidate.end_time);
+  return bookings.find(b => {
+    if (b.id === candidate.id) return false;
+    if (b.room_id !== candidate.room_id || b.date !== candidate.date) return false;
+    return cS < toMin(b.end_time) && cE > toMin(b.start_time);
+  }) || null;
+}
+
+function computeColumns(dayBookings) {
+  const sorted = [...dayBookings].sort((a,b)=>toMin(a.start_time)-toMin(b.start_time));
+  const colEnds = [];
+  const withCol = sorted.map(b => {
+    const bS = toMin(b.start_time), bE = toMin(b.end_time);
+    let col = colEnds.findIndex(e => e <= bS);
+    if (col === -1) { col = colEnds.length; colEnds.push(bE); } else { colEnds[col] = bE; }
+    return { ...b, col };
+  });
+  return withCol.map(b => {
+    const bS = toMin(b.start_time), bE = toMin(b.end_time);
+    const overlapping = withCol.filter(o => bS < toMin(o.end_time) && bE > toMin(o.start_time));
+    return { ...b, totalCols: Math.max(...overlapping.map(o=>o.col))+1 };
+  });
+}
+
+// ─── TOAST ────────────────────────────────────────────────────────────────────
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const add = useCallback(({ icon="ℹ️", title, message, color }) => {
+    const id = Date.now();
+    setToasts(p=>[...p,{id,icon,title,message,color,leaving:false}]);
+    setTimeout(()=>{
+      setToasts(p=>p.map(t=>t.id===id?{...t,leaving:true}:t));
+      setTimeout(()=>setToasts(p=>p.filter(t=>t.id!==id)),350);
+    },3500);
+  },[]);
+  return { toasts, add };
+}
+function ToastContainer({ toasts }) {
+  return (
+    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none">
+      {toasts.map(t=>(
+        <div key={t.id} className={`pointer-events-auto flex items-start gap-3 bg-white border rounded-xl shadow-lg px-4 py-3 min-w-[280px] max-w-sm ${t.leaving?"toast-out":"toast-in"}`}
+          style={{borderColor:t.color||"#e2e8f0"}}>
+          <span className="text-xl flex-shrink-0">{t.icon}</span>
+          <div><div className="font-semibold text-sm text-slate-800">{t.title}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{t.message}</div></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── SHARED UI COMPONENTS (defined outside all screens to prevent re-mount) ───
+function Field({ label, type="text", value, onChange, placeholder, autoFocus=false }) {
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">{label}</label>
+      <input type={type} required value={value} onChange={onChange} placeholder={placeholder} autoFocus={autoFocus}
+        className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+    </div>
+  );
+}
+function AlertMsg({ msg, type="error" }) {
+  if (!msg) return null;
+  return (
+    <div className={`rounded-lg px-3 py-2 text-sm ${type==="success"?"bg-green-50 border border-green-200 text-green-700":"bg-red-50 border border-red-200 text-red-600"}`}>
+      {type==="success"?"✓ ":"⚠ "}{msg}
+    </div>
+  );
+}
+
+// ─── LOGO SVG ─────────────────────────────────────────────────────────────────
+function MajooLogo({ width=140, height=42 }) {
+  return (
+    <svg width={width} height={height} viewBox="0 0 600 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path fillRule="evenodd" clipRule="evenodd" d="M401.541 5C418.312 5 433.686 11.9059 444.652 23.0202C455.725 34.1344 462.605 49.4569 462.605 66.2901C462.605 83.1234 455.725 98.5538 444.652 109.56C433.578 120.674 418.312 127.58 401.541 127.58C384.77 127.58 369.396 120.674 358.43 109.56C347.357 98.4459 340.477 83.1234 340.477 66.2901C340.477 49.4569 347.357 34.0265 358.43 23.0202C369.504 11.9059 384.77 5 401.541 5ZM401.541 37.3716C393.585 37.3716 386.382 40.6087 381.222 45.8961C375.954 51.1834 372.729 58.4131 372.729 66.2901C372.729 74.2751 375.954 81.5048 381.222 86.6842C386.49 91.9716 393.693 95.2088 401.541 95.2088C409.497 95.2088 416.7 91.9716 421.86 86.6842C427.128 81.3969 430.353 74.1672 430.353 66.2901C430.353 58.3052 427.128 51.0755 421.86 45.8961C416.7 40.6087 409.497 37.3716 401.541 37.3716Z" fill="url(#lg0)"/>
+      <path fillRule="evenodd" clipRule="evenodd" d="M278.122 111.395C278.122 120.351 270.919 127.58 261.996 127.58C255.868 127.58 250.6 124.127 247.805 119.164C238.774 124.559 228.239 127.58 216.95 127.58C200.179 127.58 184.806 120.674 173.84 109.56C162.766 98.4459 155.886 83.1234 155.886 66.2901C155.886 49.4569 162.766 34.0265 173.84 23.0202C184.913 11.9059 200.179 5 216.95 5C233.722 5 249.095 11.9059 260.061 23.0202C270.919 33.9186 277.692 48.9174 278.015 65.4269V65.5348V65.8585V65.9664V66.3981V66.8297V111.395H278.122ZM245.87 66.6139V65.8585C245.762 58.0894 242.537 50.9676 237.377 45.7882C232.109 40.5008 224.906 37.2637 217.058 37.2637C209.102 37.2637 201.899 40.5008 196.739 45.7882C191.471 51.0755 188.246 58.3052 188.246 66.1822C188.246 74.1672 191.471 81.3969 196.739 86.5763C202.007 91.8637 209.21 95.1008 217.058 95.1008C225.013 95.1008 232.216 91.8637 237.377 86.5763C242.537 81.5048 245.762 74.491 245.87 66.6139Z" fill="url(#lg1)"/>
+      <path fillRule="evenodd" clipRule="evenodd" d="M538.828 5C555.599 5 570.973 11.9059 582.046 23.0202C593.12 34.1344 600 49.4569 600 66.2901C600 83.1234 593.12 98.5538 582.046 109.56C570.973 120.674 555.707 127.58 538.936 127.58C522.164 127.58 506.791 120.674 495.825 109.56C484.752 98.4459 477.871 83.1234 477.871 66.2901C477.871 49.4569 484.752 34.0265 495.825 23.0202C506.683 11.9059 521.949 5 538.828 5ZM538.828 37.3716C530.873 37.3716 523.67 40.6087 518.509 45.8961C513.241 51.1834 510.016 58.4131 510.016 66.2901C510.016 74.2751 513.241 81.5048 518.509 86.6842C523.777 91.9716 530.98 95.2088 538.828 95.2088C546.784 95.2088 553.987 91.9716 559.147 86.6842C564.415 81.3969 567.64 74.1672 567.64 66.2901C567.64 58.3052 564.415 51.0755 559.147 45.8961C553.879 40.6087 546.676 37.3716 538.828 37.3716Z" fill="url(#lg2)"/>
+      <path fillRule="evenodd" clipRule="evenodd" d="M293.173 21.1858C293.173 12.2296 300.376 5 309.299 5C318.223 5 325.426 12.2296 325.426 21.1858C325.426 51.3992 325.533 81.3969 325.533 111.502C325.533 143.766 301.666 170.419 270.704 174.627C262.534 176.138 254.471 171.066 252.32 162.865C250.063 154.233 255.116 145.385 263.716 143.011L272.424 140.853C284.465 136.536 293.173 124.991 293.173 111.395C293.066 81.289 293.173 51.2913 293.173 21.1858Z" fill="url(#lg3)"/>
+      <path fillRule="evenodd" clipRule="evenodd" d="M140.835 111.61C140.835 120.566 133.632 127.796 124.709 127.796C115.786 127.796 108.583 120.566 108.583 111.61C108.583 91.7558 108.583 72.0091 108.583 52.2625C111.27 52.2625 113.958 52.2625 116.646 52.2625C118.581 52.2625 119.548 50.536 118.151 49.0253C111.915 41.6878 105.572 34.4581 99.337 27.1206C97.7244 24.9625 97.1869 25.3941 95.6818 27.1206C89.4463 34.4581 83.1034 41.6878 76.8679 49.0253C75.4704 50.6439 76.4379 52.2625 78.3731 52.2625C81.0607 52.2625 83.7484 52.2625 86.4361 52.2625C86.4361 72.117 86.5436 91.7558 86.5436 111.61C86.5436 120.566 79.3406 127.796 70.4175 127.796C61.4944 127.796 54.2913 120.566 54.2913 111.61C54.2913 97.6906 54.3989 83.8787 54.3989 70.0668C57.0865 70.0668 59.7742 70.0668 62.4619 70.0668C64.3971 70.0668 65.3646 68.3404 63.967 66.8297C57.7316 59.4921 51.3886 52.2625 45.1532 44.9249C43.5406 42.7668 43.003 43.1984 41.4979 44.9249C35.2625 52.2625 28.9195 59.4921 22.6841 66.8297C21.2865 68.4483 22.2541 70.0668 24.1892 70.0668C26.8769 70.0668 29.5646 70.0668 32.2523 70.0668V70.8222V111.61C32.2523 120.566 25.0493 127.796 16.1261 127.796C7.20301 127.796 0 120.566 0 111.61V48.3779C0 36.5083 4.83784 25.6099 12.6859 17.7328C20.534 9.85572 31.3922 5 43.3256 5C53.6463 5 63.107 8.66878 70.525 14.7115C77.943 8.66878 87.4037 5 97.7244 5C109.658 5 120.516 9.85572 128.364 17.7328C136.212 25.6099 141.05 36.5083 141.05 48.3779V111.61H140.835Z" fill="url(#lg4)"/>
+      <defs>
+        <linearGradient id="lg0" x1="401.584" y1="123.238" x2="401.584" y2="0.59207" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+        <linearGradient id="lg1" x1="217.014" y1="115.229" x2="217.014" y2="-7.41644" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+        <linearGradient id="lg2" x1="538.798" y1="119.678" x2="538.798" y2="-2.96815" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+        <linearGradient id="lg3" x1="288.653" y1="135.285" x2="288.653" y2="-4.24338" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="0.5009" stopColor="#57C1AA"/><stop offset="0.9669" stopColor="#96CE8A"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+        <linearGradient id="lg4" x1="70.397" y1="134.015" x2="70.397" y2="-7.48128" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+// screen: "login" | "register" | "otp_register" | "forgot" | "otp_reset" | "new_password"
+function LoginScreen({ onLogin }) {
+  const [screen,   setScreen]   = useState("login");
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+  const [name,     setName]     = useState("");
+  const [confirm,  setConfirm]  = useState("");
+  const [otp,      setOtp]      = useState("");
+  const [newPass,  setNewPass]  = useState("");
+  const [newConf,  setNewConf]  = useState("");
+  const [error,    setError]    = useState("");
+  const [success,  setSuccess]  = useState("");
+  const [loading,  setLoading]  = useState(false);
+  const [resendCD, setResendCD] = useState(0); // countdown resend
+
+  // Countdown timer for resend
+  useEffect(() => {
+    if (resendCD <= 0) return;
+    const t = setTimeout(() => setResendCD(c => c-1), 1000);
+    return () => clearTimeout(t);
+  }, [resendCD]);
+
+  const go = s => { setScreen(s); setError(""); setSuccess(""); setOtp(""); };
+
+  // ── LOGIN ──
+  const handleLogin = async e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    try {
+      const users = await supa.get("users", { email: `eq.${email}`, select: "*" });
+      const user = users.find(u => u.password_hash === password || u.password_hash === btoa(password));
+      if (!user) { setError("Email atau password salah."); setLoading(false); return; }
+      const { password_hash, ...safe } = user;
+      onLogin(safe);
+    } catch(err) { setError("Gagal login: " + err.message); }
+    setLoading(false);
+  };
+
+  // ── REGISTER step 1: kirim OTP ──
+  const handleRegisterRequest = async e => {
+    e.preventDefault();
+    if (loading) return; // prevent double submit
+    setError(""); setLoading(true);
+    try {
+      if (password.length < 6)   { setError("Password minimal 6 karakter."); setLoading(false); return; }
+      if (password !== confirm)  { setError("Konfirmasi password tidak cocok."); setLoading(false); return; }
+      const existing = await supa.get("users", { email: `eq.${email}` });
+      if (existing.length > 0)   { setError("Email sudah terdaftar."); setLoading(false); return; }
+      const code = generateOTP();
+      storeOTP(email, code);
+      await sendOTPEmail(name, email, code, false);
+      setResendCD(60);
+      go("otp_register");
+      setSuccess(`Kode OTP dikirim ke ${email}. Berlaku 5 menit.`);
+    } catch(err) { setError("Gagal mengirim OTP: " + (err?.message || err?.text || JSON.stringify(err))); }
+    setLoading(false);
+  };
+
+  // ── REGISTER step 2: verifikasi OTP & buat akun ──
+  const handleVerifyRegister = async e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    try {
+      const result = verifyOTP(email, otp.trim());
+      if (result === "expired")   { setError("Kode OTP sudah kadaluarsa. Kirim ulang."); setLoading(false); return; }
+      if (result !== "ok")        { setError("Kode OTP salah. Periksa kembali."); setLoading(false); return; }
+      const initials = name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+      const role = ADMIN_EMAILS.includes(email) ? "admin" : "user";
+      await supa.insert("users", { id: "u-"+Date.now(), name, email, role, password_hash: password });
+      setSuccess("Akun berhasil dibuat! Silakan masuk.");
+      setEmail(""); setPassword(""); setConfirm(""); setName(""); setOtp("");
+      setTimeout(() => go("login"), 1500);
+    } catch(err) { setError("Gagal membuat akun: " + err.message); }
+    setLoading(false);
+  };
+
+  // ── RESEND OTP ──
+  const handleResend = async (isReset=false) => {
+    if (resendCD > 0) return;
+    setError(""); setLoading(true);
+    try {
+      const code = generateOTP();
+      storeOTP(email, code);
+      await sendOTPEmail(name || email, email, code, isReset);
+      setResendCD(60);
+      setSuccess("Kode OTP baru sudah dikirim.");
+    } catch(err) { setError("Gagal mengirim ulang: " + (err?.message || err?.text || JSON.stringify(err))); }
+    setLoading(false);
+  };
+
+  // ── FORGOT PASSWORD: kirim link reset ──
+  const handleForgotRequest = async e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    try {
+      const users = await supa.get("users", { email: `eq.${email}` });
+      if (users.length === 0) { setError("Email tidak ditemukan."); setLoading(false); return; }
+      const token = await createResetToken(email);
+      const resetLink = `${BASE_URL}/reset-password.html?token=${token}`;
+      await sendResetEmail(users[0].name, email, resetLink);
+      go("forgot_sent");
+    } catch(err) {
+      console.error("Reset email error full:", err);
+      const msg = err?.message || err?.text || JSON.stringify(err) || "unknown error";
+      setError("Gagal mengirim email: " + msg);
+    }
+    setLoading(false);
+  };
+
+
+  const renderOTPBox = (onSubmit, onResend, isReset=false) => (
+    <form onSubmit={onSubmit} className="space-y-5 fade-in">
+      <div className="text-center">
+        <div className="text-4xl mb-3">📨</div>
+        <p className="text-sm text-slate-600">Masukkan 6-digit kode yang dikirim ke</p>
+        <p className="font-semibold text-slate-800 text-sm">{email}</p>
+      </div>
+      <div>
+        <input type="text" inputMode="numeric" maxLength={6} value={otp}
+          onChange={e=>setOtp(e.target.value.replace(/\D/g,""))}
+          autoFocus placeholder="000000"
+          className="otp-input w-full border-2 border-slate-200 rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200"/>
+      </div>
+      {success && <AlertMsg msg={success} type="success"/>}
+      {error   && <AlertMsg msg={error}/>}
+      <button type="submit" disabled={loading || otp.length < 6}
+        className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+        {loading ? "Memverifikasi..." : "Verifikasi Kode →"}
+      </button>
+      <div className="text-center text-xs text-slate-500">
+        Tidak menerima kode?{" "}
+        {resendCD > 0
+          ? <span className="text-slate-400">Kirim ulang dalam {resendCD}s</span>
+          : <button type="button" onClick={()=>onResend(isReset)} className="text-blue-500 hover:underline font-medium">Kirim Ulang</button>
+        }
+      </div>
+      <button type="button" onClick={()=>go(isReset?"forgot":"register")}
+        className="w-full text-slate-400 hover:text-slate-600 text-xs transition-colors">
+        ← Kembali
+      </button>
+    </form>
+  );
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-8">
+          <div className="flex justify-center mb-5"><MajooLogo/></div>
+          <h1 className="text-2xl font-bold text-slate-800">Meeting Room Booking</h1>
+          <p className="text-slate-500 text-sm mt-1">Silakan masuk untuk melanjutkan</p>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
+
+          {/* ── TAB: LOGIN ── */}
+          {screen === "login" && (
+            <div className="fade-in">
+              <div className="flex gap-1 bg-slate-100 rounded-xl p-1 mb-6">
+                <button className="flex-1 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm">Masuk</button>
+                <button onClick={()=>go("register")} className="flex-1 py-2 text-sm font-semibold rounded-lg text-slate-500 hover:text-slate-700 transition-colors">Daftar</button>
+              </div>
+              <form onSubmit={handleLogin} className="space-y-4">
+                <Field label="Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="email@majoo.id"/>
+                <Field label="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••"/>
+                <AlertMsg msg={error}/>
+                <button type="submit" disabled={loading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                  {loading ? "Memproses..." : "Masuk →"}
+                </button>
+                <div className="text-center">
+                  <button type="button" onClick={()=>go("forgot")} className="text-xs text-blue-500 hover:underline">Lupa password?</button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* ── TAB: REGISTER ── */}
+          {screen === "register" && (
+            <div className="fade-in">
+              <div className="flex gap-1 bg-slate-100 rounded-xl p-1 mb-6">
+                <button onClick={()=>go("login")} className="flex-1 py-2 text-sm font-semibold rounded-lg text-slate-500 hover:text-slate-700 transition-colors">Masuk</button>
+                <button className="flex-1 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white shadow-sm">Daftar</button>
+              </div>
+              <form onSubmit={handleRegisterRequest} className="space-y-4">
+                <Field label="Nama Lengkap" value={name} onChange={e=>setName(e.target.value)} placeholder="Nama Anda"/>
+                <Field label="Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="email@majoo.id"/>
+                <Field label="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Min. 6 karakter"/>
+                <Field label="Konfirmasi Password" type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="Ulangi password"/>
+                <AlertMsg msg={error}/>
+                <button type="submit" disabled={loading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                  {loading ? "Mengirim OTP..." : "Daftar & Verifikasi Email →"}
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* ── OTP REGISTER ── */}
+          {screen === "otp_register" && renderOTPBox(handleVerifyRegister, handleResend, false)}
+
+          {/* ── FORGOT PASSWORD ── */}
+          {screen === "forgot" && (
+            <div className="fade-in space-y-4">
+              <div className="text-center mb-2">
+                <div className="text-3xl mb-2">🔐</div>
+                <h3 className="font-bold text-slate-800">Lupa Password</h3>
+                <p className="text-xs text-slate-500 mt-1">Masukkan email kamu, kami kirim link reset password</p>
+              </div>
+              <form onSubmit={handleForgotRequest} className="space-y-4">
+                <Field label="Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="email@majoo.id" autoFocus/>
+                <AlertMsg msg={error}/>
+                <button type="submit" disabled={loading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                  {loading ? "Mengirim..." : "Kirim Link Reset Password →"}
+                </button>
+                <button type="button" onClick={()=>go("login")} className="w-full text-slate-400 hover:text-slate-600 text-xs transition-colors">
+                  ← Kembali ke Masuk
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* ── FORGOT: link sent ── */}
+          {screen === "forgot_sent" && (
+            <div className="fade-in text-center space-y-4">
+              <div className="text-5xl mb-2">📬</div>
+              <h3 className="font-bold text-slate-800">Email Terkirim!</h3>
+              <p className="text-sm text-slate-500">Link reset password sudah dikirim ke<br/><strong className="text-slate-700">{email}</strong></p>
+              <p className="text-xs text-slate-400">Link berlaku 30 menit. Cek folder Spam jika tidak masuk.</p>
+              <button onClick={()=>go("login")} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm text-sm">
+                ← Kembali ke Masuk
+              </button>
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ROOM SIDEBAR ─────────────────────────────────────────────────────────────
+function RoomSidebar({ rooms, selectedRooms, onToggle }) {
+  return (
+    <aside className="w-60 min-w-[200px] bg-white border-r border-slate-200 flex flex-col h-full overflow-y-auto">
+      <div className="p-4 border-b border-slate-100">
+        <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Meeting Rooms</h2>
+      </div>
+      <div className="flex-1 p-3 space-y-2">
+        {rooms.map(room=>{
+          const on = selectedRooms.includes(room.id);
+          return (
+            <button key={room.id} onClick={()=>onToggle(room.id)}
+              className={`w-full text-left rounded-xl p-3 border-2 transition-all ${on?"shadow-md":"border-slate-100 bg-slate-50 opacity-60"}`}
+              style={on?{borderColor:room.colorHex,backgroundColor:room.colorHex+"12"}:{}}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="w-3 h-3 rounded-full flex-shrink-0" style={{backgroundColor:room.colorHex}}/>
+                <span className="font-semibold text-sm text-slate-800 truncate">{room.name}</span>
+              </div>
+              <div className="text-xs text-slate-500 mb-2">👥 Maks. {room.capacity} orang</div>
+              <div className="flex flex-wrap gap-1">
+                {room.facilities.map(f=>(
+                  <span key={f} className="text-xs bg-white rounded-full px-2 py-0.5 border border-slate-200 text-slate-600">
+                    {FACILITY_ICONS[f]||"•"} {f}
+                  </span>
+                ))}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <div className="p-3 border-t border-slate-100">
+        <div className="text-xs text-slate-400 text-center">{selectedRooms.length} dari {rooms.length} room</div>
+      </div>
+    </aside>
+  );
+}
+
+// ─── BOOKING CHIP ─────────────────────────────────────────────────────────────
+function BookingChip({ booking, room, currentUser, col, totalCols, onClick }) {
+  const SLOT_H   = 56;
+  const start    = toMin(booking.start_time) - toMin("08:00");
+  const duration = toMin(booking.end_time)   - toMin(booking.start_time);
+  const top    = (start/60)*SLOT_H;
+  const height = Math.max((duration/60)*SLOT_H-4, 24);
+  const GAP    = 2;
+  const isOwn  = booking.booked_by_email === currentUser?.email;
+  return (
+    <div className="absolute rounded-lg px-2 py-1 booking-chip cursor-pointer shadow-sm hover:shadow-md hover:z-10 transition-shadow overflow-hidden"
+      style={{
+        top: top+"px", height: height+"px",
+        left: `calc(${(col/totalCols)*100}% + ${col===0?4:GAP}px)`,
+        width: `calc(${(1/totalCols)*100}% - ${col===0?GAP+4:GAP*2}px)`,
+        backgroundColor: room.colorHex+"22",
+        borderLeft: `3px solid ${room.colorHex}`,
+        color: room.colorHex,
+      }}
+      onClick={()=>onClick(booking)}>
+      <div className="font-semibold truncate">{booking.title}</div>
+      {height>36 && <div className="text-xs opacity-75 truncate">{booking.start_time}–{booking.end_time}</div>}
+      {height>52 && isOwn && <div className="text-xs opacity-60 truncate">📌 Saya</div>}
+    </div>
+  );
+}
+
+// ─── CALENDAR GRID ────────────────────────────────────────────────────────────
+function CalendarGrid({ weekDays, bookings, rooms, selectedRooms, currentUser, onSlotClick, onChipClick }) {
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="sticky top-0 z-10 bg-white border-b border-slate-200 flex">
+        <div className="w-16 flex-shrink-0"/>
+        {weekDays.map((day,i)=>{
+          const isToday = localDateStr(day)===todayStr();
+          return (
+            <div key={i} className={`flex-1 text-center py-3 border-l border-slate-100 ${isToday?"text-blue-600 bg-blue-50":"text-slate-600"}`}>
+              <span className="text-xs font-normal text-slate-400 block">{day.toLocaleDateString("id-ID",{weekday:"short"})}</span>
+              <span className={`text-lg font-bold leading-tight ${isToday?"bg-blue-600 text-white rounded-full w-8 h-8 flex items-center justify-center mx-auto":""}`}>{day.getDate()}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex">
+        <div className="w-16 flex-shrink-0">
+          {HOURS.map(h=>(
+            <div key={h} className="h-14 flex items-start justify-end pr-2 pt-1">
+              <span className="text-xs text-slate-400 font-medium">{h}</span>
+            </div>
+          ))}
+        </div>
+        {weekDays.map((day,di)=>{
+          const dateStr = localDateStr(day);
+          const isToday = dateStr===todayStr();
+          const laid    = computeColumns(bookings.filter(b=>b.date===dateStr && selectedRooms.includes(b.room_id)));
+          return (
+            <div key={di} className={`flex-1 border-l border-slate-100 relative ${isToday?"bg-blue-50/30":""}`}
+              style={{minHeight:HOURS.length*56+"px"}}>
+              {HOURS.map(h=>(
+                <div key={h} className="h-14 border-b border-slate-100 time-slot" onClick={()=>onSlotClick(dateStr,h)}/>
+              ))}
+              <div className="absolute inset-0 pointer-events-none">
+                {laid.map(b=>{
+                  const room = rooms.find(r=>r.id===b.room_id);
+                  return (
+                    <div key={b.id} className="pointer-events-auto">
+                      <BookingChip booking={b} room={room} currentUser={currentUser}
+                        col={b.col} totalCols={b.totalCols} onClick={onChipClick}/>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── BOOKING MODAL ────────────────────────────────────────────────────────────
+function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, bookings, currentUser }) {
+  const isEdit = !!initialData?.id;
+  const blank  = { room_id:rooms[0]?.id, title:"", date:todayStr(), start_time:"09:00", end_time:"10:00", attendees:"", notes:"" };
+  const [form,     setForm]     = useState(blank);
+  const [conflict, setConflict] = useState(null);
+  const [loading,  setLoading]  = useState(false);
+
+  useEffect(()=>{ if(isOpen){ setForm(initialData||blank); setConflict(null); } },[isOpen,initialData]);
+  if (!isOpen) return null;
+
+  const set = (k,v) => {
+    const up = {...form,[k]:v};
+    setForm(up);
+    if (up.room_id && up.date && up.start_time && up.end_time)
+      setConflict(findConflict(bookings, up));
+  };
+
+  const canEdit = !isEdit || initialData?.booked_by_email===currentUser?.email || currentUser?.role==="admin";
+
+  const submit = async e => {
+    e.preventDefault();
+    if (conflict || loading) return;
+    setLoading(true);
+    await onSave({...form, booked_by_name:currentUser?.name, booked_by_email:currentUser?.email});
+    setLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay bg-black/30">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+          <h2 className="text-lg font-bold text-slate-800">{isEdit?"✏️ Edit Booking":"📅 Booking Baru"}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <form onSubmit={submit} className="p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Nama Meeting *</label>
+            <input type="text" required placeholder="cth. Sprint Planning" value={form.title}
+              onChange={e=>set("title",e.target.value)} disabled={!canEdit}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Pilih Room *</label>
+            <div className="grid grid-cols-2 gap-2">
+              {rooms.map(room=>(
+                <button type="button" key={room.id} disabled={!canEdit}
+                  onClick={()=>set("room_id",room.id)}
+                  className={`text-left rounded-lg p-2.5 border-2 transition-all text-sm ${form.room_id===room.id?"shadow-md":"border-slate-100 bg-slate-50"}`}
+                  style={form.room_id===room.id?{borderColor:room.colorHex,backgroundColor:room.colorHex+"12"}:{}}>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:room.colorHex}}/>
+                    <span className="font-semibold text-slate-800">{room.name}</span>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-0.5">👥 {room.capacity} orang</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="col-span-3 sm:col-span-1">
+              <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Tanggal *</label>
+              <input type="date" required value={form.date} onChange={e=>set("date",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Mulai *</label>
+              <input type="time" required value={form.start_time} onChange={e=>set("start_time",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Selesai *</label>
+              <input type="time" required value={form.end_time} onChange={e=>set("end_time",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
+            </div>
+          </div>
+          {conflict && (
+            <div className="bg-red-50 border border-red-300 rounded-lg px-4 py-3 text-sm text-red-700 flex items-start gap-2">
+              <span className="text-lg flex-shrink-0">⚠️</span>
+              <div><strong>Konflik Jadwal!</strong> Room sudah dibooking untuk <strong>"{conflict.title}"</strong> pukul {conflict.start_time}–{conflict.end_time} oleh {conflict.booked_by_name||"pengguna lain"}.</div>
+            </div>
+          )}
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Peserta</label>
+            <input type="text" placeholder="cth. Tim Product, Budi, +3" value={form.attendees}
+              onChange={e=>set("attendees",e.target.value)} disabled={!canEdit}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Catatan</label>
+            <textarea placeholder="Catatan opsional..." value={form.notes} onChange={e=>set("notes",e.target.value)}
+              rows={2} disabled={!canEdit}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:bg-slate-50"/>
+          </div>
+          {isEdit && initialData?.booked_by_name && (
+            <div className="text-xs text-slate-400">👤 Dibooking oleh: <span className="font-medium text-slate-600">{initialData.booked_by_name}</span></div>
+          )}
+          <div className="flex gap-2 pt-1">
+            {isEdit && canEdit && (
+              <button type="button" onClick={()=>onDelete(form.id)}
+                className="px-4 py-2 rounded-lg border border-red-200 text-red-500 text-sm font-medium hover:bg-red-50">
+                🗑 Hapus
+              </button>
+            )}
+            <div className="flex-1"/>
+            <button type="button" onClick={onClose}
+              className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50">Batal</button>
+            {canEdit && (
+              <button type="submit" disabled={!!conflict||loading}
+                className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 shadow-sm">
+                {loading ? "Menyimpan..." : isEdit?"Simpan":"Booking Sekarang"}
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── DETAIL MODAL ─────────────────────────────────────────────────────────────
+function DetailModal({ booking, room, onClose, onEdit, onDelete, currentUser }) {
+  if (!booking) return null;
+  const isOwner = booking.booked_by_email === currentUser?.email;
+  const canAct  = isOwner || currentUser?.role === "admin";
+  const rows = [
+    {icon:"🏢", label:"Room",   val:room.name},
+    {icon:"📅", label:"Tanggal",val:new Date(booking.date+"T00:00").toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"})},
+    {icon:"🕐", label:"Waktu",  val:`${booking.start_time} – ${booking.end_time}`},
+    booking.attendees      && {icon:"👥",label:"Peserta",        val:booking.attendees},
+    booking.booked_by_name && {icon:"👤",label:"Dibooking oleh", val:booking.booked_by_name},
+    booking.notes          && {icon:"📝",label:"Catatan",        val:booking.notes},
+  ].filter(Boolean);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay bg-black/30">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+        <div className="h-2" style={{backgroundColor:room.colorHex}}/>
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-base font-bold text-slate-800">{booking.title}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div className="p-6 space-y-3 text-sm">
+          {rows.map(r=>(
+            <div key={r.label} className="flex items-start gap-3">
+              <span className="w-8 text-center text-base flex-shrink-0">{r.icon}</span>
+              <div><div className="font-medium text-slate-700">{r.val}</div><div className="text-xs text-slate-400">{r.label}</div></div>
+            </div>
+          ))}
+        </div>
+        {!canAct && (
+          <div className="mx-6 mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800">
+            Booking ini milik <strong>{booking.booked_by_name||"karyawan lain"}</strong>. Hanya pemilik atau Admin yang dapat mengubahnya.
+          </div>
+        )}
+        <div className="px-6 pb-5 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50">Tutup</button>
+          {canAct && currentUser?.role==="admin" && (
+            <button onClick={()=>onEdit(booking)} className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700">Edit</button>
+          )}
+          {canAct && (
+            <button onClick={()=>{ if(window.confirm("Batalkan booking ini?")) onDelete(booking.id); }}
+              className="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-semibold hover:bg-red-600">
+              Batalkan
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── NOTIF HELPERS (localStorage) ────────────────────────────────────────────
+function loadNotifLogs(userId) {
+  try { return JSON.parse(localStorage.getItem("roombook_notifs_" + userId) || "[]"); } catch { return []; }
+}
+function saveNotifLogs(userId, logs) {
+  try { localStorage.setItem("roombook_notifs_" + userId, JSON.stringify(logs.slice(-50))); } catch {} // simpan max 50
+}
+function countUnread(logs) { return logs.filter(l => !l.read).length; }
+
+// ─── NOTIF PANEL ──────────────────────────────────────────────────────────────
+function NotifPanel({ logs, onClose, onMarkAllRead, onClearAll }) {
+  const unread = countUnread(logs);
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end modal-overlay bg-black/20" onClick={onClose}>
+      <div className="w-full max-w-sm bg-white shadow-2xl flex flex-col h-full" onClick={e=>e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="font-bold text-slate-800">🔔 Riwayat Aktivitas</h2>
+            {unread > 0 && <span className="bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 font-bold">{unread} baru</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            {logs.length > 0 && <button onClick={onClearAll} className="text-xs text-slate-400 hover:text-red-500 transition-colors">Hapus Semua</button>}
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {logs.length === 0
+            ? <div className="text-center text-slate-400 text-sm py-10">Belum ada aktivitas</div>
+            : [...logs].reverse().map(log => (
+              <div key={log.id} className={`border rounded-xl p-3 transition-colors ${log.read ? "bg-white border-slate-100" : "bg-blue-50 border-blue-200"}`}>
+                <div className="flex items-start gap-2">
+                  <span className="text-lg flex-shrink-0">{log.icon}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className={`font-semibold text-sm ${log.read ? "text-slate-700" : "text-slate-900"}`}>{log.title}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{log.message}</div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      {new Date(log.ts).toLocaleDateString("id-ID",{day:"2-digit",month:"short"})} · {new Date(log.ts).toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})}
+                    </div>
+                  </div>
+                  {!log.read && <div className="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0 mt-1.5"></div>}
+                </div>
+              </div>
+            ))
+          }
+        </div>
+        {unread > 0 && (
+          <div className="px-5 py-3 border-t border-slate-100">
+            <button onClick={onMarkAllRead} className="w-full text-sm text-blue-600 hover:text-blue-700 font-semibold py-1">
+              Tandai Semua Sudah Dibaca
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── ACCOUNT SETTINGS MODAL ───────────────────────────────────────────────────
+function AccountModal({ currentUser, onClose, onUpdate }) {
+  const [name,        setName]        = useState(currentUser.name || "");
+  const [photo,       setPhoto]       = useState(currentUser.photo || "");
+  const [oldPass,     setOldPass]     = useState("");
+  const [newPass,     setNewPass]     = useState("");
+  const [confirmPass, setConfirmPass] = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState("");
+  const [success,     setSuccess]     = useState("");
+  const [tab,         setTab]         = useState("profile"); // "profile" | "password"
+
+  const initials = name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2) || "?";
+
+  const handlePhotoChange = e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 2*1024*1024) { setError("Foto maksimal 2MB."); return; }
+    const reader = new FileReader();
+    reader.onload = ev => setPhoto(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const saveProfile = async e => {
+    e.preventDefault();
+    setError(""); setSuccess(""); setLoading(true);
+    try {
+      if (!name.trim()) { setError("Nama tidak boleh kosong."); setLoading(false); return; }
+      const newName = name.trim();
+      // Simpan nama ke Supabase (tabel users)
+      await supa.update("users", currentUser.id, { name: newName });
+      // Update semua booking milik user ini dengan nama baru
+      if (newName !== currentUser.name) {
+        await fetch(`${SUPA_URL}/rest/v1/bookings?booked_by_email=eq.${encodeURIComponent(currentUser.email)}`, {
+          method: "PATCH",
+          headers: { ...supa.headers },
+          body: JSON.stringify({ booked_by_name: newName })
+        });
+      }
+      // Simpan foto ke localStorage
+      if (photo) localStorage.setItem("roombook_photo_" + currentUser.id, photo);
+      const updated = { ...currentUser, name: newName, photo: photo || currentUser.photo };
+      onUpdate(updated);
+      setSuccess("Profil berhasil disimpan!");
+    } catch(err) { setError("Gagal menyimpan: " + err.message); }
+    setLoading(false);
+  };
+
+  const savePassword = async e => {
+    e.preventDefault();
+    setError(""); setSuccess(""); setLoading(true);
+    try {
+      if (!oldPass) { setError("Masukkan password lama."); setLoading(false); return; }
+      if (newPass.length < 6) { setError("Password baru minimal 6 karakter."); setLoading(false); return; }
+      if (newPass !== confirmPass) { setError("Konfirmasi password tidak cocok."); setLoading(false); return; }
+      // Verifikasi password lama
+      const users = await supa.get("users", { id: `eq.${currentUser.id}` });
+      if (!users.length || users[0].password_hash !== oldPass) { setError("Password lama salah."); setLoading(false); return; }
+      await supa.update("users", currentUser.id, { password_hash: newPass });
+      setOldPass(""); setNewPass(""); setConfirmPass("");
+      setSuccess("Password berhasil diubah!");
+    } catch(err) { setError("Gagal mengubah password: " + err.message); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{background:"rgba(0,0,0,0.4)"}}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 className="font-bold text-slate-800 text-lg">Pengaturan Akun</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-slate-100">
+          {["profile","password"].map(t => (
+            <button key={t} onClick={()=>{setTab(t);setError("");setSuccess("");}}
+              className={`flex-1 py-2.5 text-sm font-semibold transition-colors ${tab===t?"text-blue-600 border-b-2 border-blue-600":"text-slate-400 hover:text-slate-600"}`}>
+              {t==="profile" ? "Profil" : "Password"}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-6">
+          {/* Alert */}
+          {error   && <div className="mb-4 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl px-4 py-3">⚠ {error}</div>}
+          {success && <div className="mb-4 bg-green-50 border border-green-200 text-green-700 text-sm rounded-xl px-4 py-3">✓ {success}</div>}
+
+          {/* Tab Profil */}
+          {tab === "profile" && (
+            <form onSubmit={saveProfile} className="space-y-5">
+              {/* Foto */}
+              <div className="flex flex-col items-center gap-3">
+                <div className="relative">
+                  {photo
+                    ? <img src={photo} alt="avatar" className="w-20 h-20 rounded-full object-cover border-2 border-slate-200"/>
+                    : <div className="w-20 h-20 rounded-full bg-blue-600 text-white text-2xl font-bold flex items-center justify-center">{initials}</div>
+                  }
+                  <label className="absolute -bottom-1 -right-1 bg-white border border-slate-200 rounded-full p-1.5 cursor-pointer hover:bg-slate-50 shadow-sm">
+                    <svg className="w-3.5 h-3.5 text-slate-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828A2 2 0 019 17H7v-2a2 2 0 01.586-1.414z"/></svg>
+                    <input type="file" accept="image/*" onChange={handlePhotoChange} className="hidden"/>
+                  </label>
+                </div>
+                <p className="text-xs text-slate-400">Klik ikon pensil untuk ganti foto (maks. 2MB)</p>
+              </div>
+
+              {/* Nama */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Nama Lengkap</label>
+                <input type="text" value={name} onChange={e=>setName(e.target.value)}
+                  className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+              </div>
+
+              {/* Email (disabled) */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">Email</label>
+                <input type="email" value={currentUser.email} disabled
+                  className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm bg-slate-50 text-slate-400 cursor-not-allowed"/>
+                <p className="text-xs text-slate-400 mt-1">Email tidak dapat diubah.</p>
+              </div>
+
+              <button type="submit" disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors">
+                {loading ? "Menyimpan..." : "Simpan Profil"}
+              </button>
+            </form>
+          )}
+
+          {/* Tab Password */}
+          {tab === "password" && (
+            <form onSubmit={savePassword} className="space-y-4">
+              {[
+                {label:"Password Lama", val:oldPass, set:setOldPass},
+                {label:"Password Baru", val:newPass, set:setNewPass},
+                {label:"Konfirmasi Password Baru", val:confirmPass, set:setConfirmPass},
+              ].map(({label,val,set}) => (
+                <div key={label}>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">{label}</label>
+                  <input type="password" value={val} onChange={e=>set(e.target.value)}
+                    className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                </div>
+              ))}
+              <button type="submit" disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors">
+                {loading ? "Mengubah..." : "Ubah Password"}
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [currentUser,   setCurrentUser]   = useState(()=>loadSession());
+  const [bookings,      setBookings]      = useState([]);
+  const [selectedRooms, setSelectedRooms] = useState(ROOMS.map(r=>r.id));
+  const [baseDate,      setBaseDate]      = useState(new Date());
+  const [modalOpen,     setModalOpen]     = useState(false);
+  const [modalInit,     setModalInit]     = useState(null);
+  const [detailBooking, setDetailBooking] = useState(null);
+  const [notifOpen,     setNotifOpen]     = useState(false);
+  const [notifLogs,     setNotifLogs]     = useState(() => { const s = loadSession(); return s ? loadNotifLogs(s.id) : []; });
+  const [loading,       setLoading]       = useState(false);
+  const [accountOpen,   setAccountOpen]   = useState(false);
+  const { toasts, add: addToast } = useToast();
+
+  const weekDays = useMemo(()=>getWeekDays(baseDate),[baseDate]);
+
+  // Load semua bookings dari Supabase
+  const loadBookings = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await supa.get("bookings", { select: "*", order: "date.asc,start_time.asc" });
+      setBookings(data);
+    } catch(e) {
+      addToast({ icon:"❌", title:"Gagal memuat data", message:e.message, color:"#ef4444" });
+    }
+    setLoading(false);
+  }, []);
+
+  // Auto-load saat login
+  useEffect(()=>{ if (currentUser) loadBookings(); },[currentUser]);
+
+  // Realtime — poll setiap 30 detik sebagai fallback
+  useEffect(()=>{
+    if (!currentUser) return;
+    const interval = setInterval(loadBookings, 30000);
+    return () => clearInterval(interval);
+  },[currentUser]);
+
+  const login = user => { saveSession(user); setCurrentUser(user); setNotifLogs(loadNotifLogs(user.id)); };
+  const logout = () => { saveSession(null); setCurrentUser(null); setBookings([]); setNotifLogs([]); };
+  const updateUser = user => { saveSession(user); setCurrentUser(user); };
+
+  const notify = (type, booking) => {
+    const room  = ROOMS.find(r=>r.id===booking.room_id);
+    const icons = {create:"✅",update:"✏️",delete:"🗑️"};
+    const titles= {create:"Booking Berhasil",update:"Booking Diperbarui",delete:"Booking Dihapus"};
+    const entry = {id:Date.now(),ts:Date.now(),icon:icons[type],title:titles[type],
+      message:`"${booking.title}" — ${room?.name} · ${booking.date} · ${booking.start_time}–${booking.end_time}`,
+      read: false};
+    setNotifLogs(p => {
+      const updated = [...p, entry];
+      if (currentUser) saveNotifLogs(currentUser.id, updated);
+      return updated;
+    });
+    addToast({icon:icons[type],title:titles[type],message:`${booking.title} di ${room?.name}`,color:room?.colorHex});
+  };
+
+  const markAllRead = () => {
+    const updated = notifLogs.map(l => ({...l, read: true}));
+    setNotifLogs(updated);
+    if (currentUser) saveNotifLogs(currentUser.id, updated);
+  };
+
+  const clearAllNotifs = () => {
+    setNotifLogs([]);
+    if (currentUser) saveNotifLogs(currentUser.id, []);
+  };
+
+  const toggleRoom = id => setSelectedRooms(p=>
+    p.includes(id)?(p.length>1?p.filter(r=>r!==id):p):[...p,id]
+  );
+
+  const prevWeek = ()=>{ const d=new Date(baseDate); d.setDate(d.getDate()-7); setBaseDate(d); };
+  const nextWeek = ()=>{ const d=new Date(baseDate); d.setDate(d.getDate()+7); setBaseDate(d); };
+
+  const openNew = (date, startTime) => {
+    setModalInit({room_id:selectedRooms[0]||ROOMS[0].id,title:"",date:date||todayStr(),
+      start_time:startTime||"09:00",end_time:startTime?addHour(startTime):"10:00",attendees:"",notes:""});
+    setModalOpen(true);
+  };
+  const openEdit = b => { setDetailBooking(null); setModalInit({...b}); setModalOpen(true); };
+
+  const handleSave = async data => {
+    try {
+      if (data.id) {
+        const updated = await supa.update("bookings", data.id, {
+          room_id: data.room_id, title: data.title, date: data.date,
+          start_time: data.start_time, end_time: data.end_time,
+          attendees: data.attendees, notes: data.notes,
+          booked_by_name: data.booked_by_name, booked_by_email: data.booked_by_email,
+        });
+        setBookings(p=>p.map(b=>b.id===data.id?(updated[0]||data):b));
+        notify("update", data);
+      } else {
+        const newId = "bk-"+Date.now();
+        const inserted = await supa.insert("bookings", {
+          id: newId, room_id: data.room_id, title: data.title, date: data.date,
+          start_time: data.start_time, end_time: data.end_time,
+          attendees: data.attendees||"", notes: data.notes||"",
+          booked_by_name: data.booked_by_name, booked_by_email: data.booked_by_email,
+          source: "app",
+        });
+        setBookings(p=>[...p, inserted[0]||{...data,id:newId}]);
+        notify("create", data);
+      }
+      setModalOpen(false);
+    } catch(e) {
+      addToast({ icon:"❌", title:"Gagal menyimpan", message:e.message, color:"#ef4444" });
+    }
+  };
+
+  const handleDelete = async id => {
+    try {
+      const b = bookings.find(b=>b.id===id);
+      await supa.delete("bookings", id);
+      setBookings(p=>p.filter(b=>b.id!==id));
+      setModalOpen(false);
+      setDetailBooking(null);
+      if (b) notify("delete", b);
+    } catch(e) {
+      addToast({ icon:"❌", title:"Gagal menghapus", message:e.message, color:"#ef4444" });
+    }
+  };
+
+  if (!currentUser) return <LoginScreen onLogin={login}/>;
+
+  const todayCount = bookings.filter(b=>b.date===todayStr()).length;
+
+  return (
+    <div className="flex flex-col h-screen overflow-hidden">
+      <header className="bg-white border-b border-slate-200 px-5 py-2.5 flex items-center gap-3 flex-shrink-0 shadow-sm">
+        <div className="flex items-center gap-2.5">
+          <svg width="80" height="24" viewBox="0 0 600 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path fillRule="evenodd" clipRule="evenodd" d="M401.541 5C418.312 5 433.686 11.9059 444.652 23.0202C455.725 34.1344 462.605 49.4569 462.605 66.2901C462.605 83.1234 455.725 98.5538 444.652 109.56C433.578 120.674 418.312 127.58 401.541 127.58C384.77 127.58 369.396 120.674 358.43 109.56C347.357 98.4459 340.477 83.1234 340.477 66.2901C340.477 49.4569 347.357 34.0265 358.43 23.0202C369.504 11.9059 384.77 5 401.541 5ZM401.541 37.3716C393.585 37.3716 386.382 40.6087 381.222 45.8961C375.954 51.1834 372.729 58.4131 372.729 66.2901C372.729 74.2751 375.954 81.5048 381.222 86.6842C386.49 91.9716 393.693 95.2088 401.541 95.2088C409.497 95.2088 416.7 91.9716 421.86 86.6842C427.128 81.3969 430.353 74.1672 430.353 66.2901C430.353 58.3052 427.128 51.0755 421.86 45.8961C416.7 40.6087 409.497 37.3716 401.541 37.3716Z" fill="url(#hlg0)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M278.122 111.395C278.122 120.351 270.919 127.58 261.996 127.58C255.868 127.58 250.6 124.127 247.805 119.164C238.774 124.559 228.239 127.58 216.95 127.58C200.179 127.58 184.806 120.674 173.84 109.56C162.766 98.4459 155.886 83.1234 155.886 66.2901C155.886 49.4569 162.766 34.0265 173.84 23.0202C184.913 11.9059 200.179 5 216.95 5C233.722 5 249.095 11.9059 260.061 23.0202C270.919 33.9186 277.692 48.9174 278.015 65.4269V65.5348V65.8585V65.9664V66.3981V66.8297V111.395H278.122ZM245.87 66.6139V65.8585C245.762 58.0894 242.537 50.9676 237.377 45.7882C232.109 40.5008 224.906 37.2637 217.058 37.2637C209.102 37.2637 201.899 40.5008 196.739 45.7882C191.471 51.0755 188.246 58.3052 188.246 66.1822C188.246 74.1672 191.471 81.3969 196.739 86.5763C202.007 91.8637 209.21 95.1008 217.058 95.1008C225.013 95.1008 232.216 91.8637 237.377 86.5763C242.537 81.5048 245.762 74.491 245.87 66.6139Z" fill="url(#hlg1)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M538.828 5C555.599 5 570.973 11.9059 582.046 23.0202C593.12 34.1344 600 49.4569 600 66.2901C600 83.1234 593.12 98.5538 582.046 109.56C570.973 120.674 555.707 127.58 538.936 127.58C522.164 127.58 506.791 120.674 495.825 109.56C484.752 98.4459 477.871 83.1234 477.871 66.2901C477.871 49.4569 484.752 34.0265 495.825 23.0202C506.683 11.9059 521.949 5 538.828 5ZM538.828 37.3716C530.873 37.3716 523.67 40.6087 518.509 45.8961C513.241 51.1834 510.016 58.4131 510.016 66.2901C510.016 74.2751 513.241 81.5048 518.509 86.6842C523.777 91.9716 530.98 95.2088 538.828 95.2088C546.784 95.2088 553.987 91.9716 559.147 86.6842C564.415 81.3969 567.64 74.1672 567.64 66.2901C567.64 58.3052 564.415 51.0755 559.147 45.8961C553.879 40.6087 546.676 37.3716 538.828 37.3716Z" fill="url(#hlg2)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M293.173 21.1858C293.173 12.2296 300.376 5 309.299 5C318.223 5 325.426 12.2296 325.426 21.1858C325.426 51.3992 325.533 81.3969 325.533 111.502C325.533 143.766 301.666 170.419 270.704 174.627C262.534 176.138 254.471 171.066 252.32 162.865C250.063 154.233 255.116 145.385 263.716 143.011L272.424 140.853C284.465 136.536 293.173 124.991 293.173 111.395C293.066 81.289 293.173 51.2913 293.173 21.1858Z" fill="url(#hlg3)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M140.835 111.61C140.835 120.566 133.632 127.796 124.709 127.796C115.786 127.796 108.583 120.566 108.583 111.61C108.583 91.7558 108.583 72.0091 108.583 52.2625C111.27 52.2625 113.958 52.2625 116.646 52.2625C118.581 52.2625 119.548 50.536 118.151 49.0253C111.915 41.6878 105.572 34.4581 99.337 27.1206C97.7244 24.9625 97.1869 25.3941 95.6818 27.1206C89.4463 34.4581 83.1034 41.6878 76.8679 49.0253C75.4704 50.6439 76.4379 52.2625 78.3731 52.2625C81.0607 52.2625 83.7484 52.2625 86.4361 52.2625C86.4361 72.117 86.5436 91.7558 86.5436 111.61C86.5436 120.566 79.3406 127.796 70.4175 127.796C61.4944 127.796 54.2913 120.566 54.2913 111.61C54.2913 97.6906 54.3989 83.8787 54.3989 70.0668C57.0865 70.0668 59.7742 70.0668 62.4619 70.0668C64.3971 70.0668 65.3646 68.3404 63.967 66.8297C57.7316 59.4921 51.3886 52.2625 45.1532 44.9249C43.5406 42.7668 43.003 43.1984 41.4979 44.9249C35.2625 52.2625 28.9195 59.4921 22.6841 66.8297C21.2865 68.4483 22.2541 70.0668 24.1892 70.0668C26.8769 70.0668 29.5646 70.0668 32.2523 70.0668V70.8222V111.61C32.2523 120.566 25.0493 127.796 16.1261 127.796C7.20301 127.796 0 120.566 0 111.61V48.3779C0 36.5083 4.83784 25.6099 12.6859 17.7328C20.534 9.85572 31.3922 5 43.3256 5C53.6463 5 63.107 8.66878 70.525 14.7115C77.943 8.66878 87.4037 5 97.7244 5C109.658 5 120.516 9.85572 128.364 17.7328C136.212 25.6099 141.05 36.5083 141.05 48.3779V111.61H140.835Z" fill="url(#hlg4)"/>
+            <defs>
+              <linearGradient id="hlg0" x1="401.584" y1="123.238" x2="401.584" y2="0.59207" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg1" x1="217.014" y1="115.229" x2="217.014" y2="-7.41644" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg2" x1="538.798" y1="119.678" x2="538.798" y2="-2.96815" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg3" x1="288.653" y1="135.285" x2="288.653" y2="-4.24338" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="0.5009" stopColor="#57C1AA"/><stop offset="0.9669" stopColor="#96CE8A"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg4" x1="70.397" y1="134.015" x2="70.397" y2="-7.48128" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+            </defs>
+          </svg>
+          <div className="w-px h-5 bg-slate-200"/>
+          <div className="text-xs font-medium text-slate-500 leading-tight">Meeting Room</div>
+        </div>
+
+        <div className="flex items-center gap-1.5 ml-1">
+          <button onClick={prevWeek} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">◀</button>
+          <button onClick={()=>setBaseDate(new Date())} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50">Hari Ini</button>
+          <button onClick={nextWeek} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">▶</button>
+          <span className="text-sm font-semibold text-slate-700 ml-1">{fmtMonthYear(weekDays[0])}</span>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={loadBookings} disabled={loading}
+            className="hidden sm:flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50 transition-colors">
+            {loading ? (
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
+            ) : (
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
+              </svg>
+            )}
+            {loading ? "Memuat..." : "Refresh"}
+          </button>
+          <div className="hidden sm:flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-600">
+            {todayCount} booking hari ini
+          </div>
+          <button onClick={()=>setNotifOpen(true)} className="relative p-2 rounded-lg hover:bg-slate-100 text-slate-500">
+            🔔
+            {countUnread(notifLogs)>0 && (
+              <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold leading-none">
+                {countUnread(notifLogs)>9?"9+":countUnread(notifLogs)}
+              </span>
+            )}
+          </button>
+          <button onClick={()=>setAccountOpen(true)}
+            className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 hover:bg-slate-100 transition-colors">
+            {currentUser.photo
+              ? <img src={currentUser.photo} alt="avatar" className="w-6 h-6 rounded-full object-cover"/>
+              : <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">
+                  {currentUser.name?.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2)||"?"}
+                </div>
+            }
+            <span className="text-xs font-medium text-slate-700 hidden sm:block">{currentUser.name}</span>
+            <span className="text-xs text-slate-400 hidden sm:block">·</span>
+            <span className="text-xs text-slate-400 hidden sm:block">{currentUser.role==="admin"?"Admin":"Employee"}</span>
+            <button onClick={e=>{e.stopPropagation();logout();}} className="text-xs text-red-400 hover:text-red-600 hidden sm:block">Keluar</button>
+          </button>
+          <button onClick={()=>openNew()}
+            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-xl shadow-sm transition-colors">
+            <span className="text-base leading-none">+</span> Booking
+          </button>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        <RoomSidebar rooms={ROOMS} selectedRooms={selectedRooms} onToggle={toggleRoom}/>
+        <main className="flex-1 flex flex-col overflow-hidden bg-white">
+          {loading && bookings.length===0 ? (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center text-slate-400">
+                <div className="text-4xl mb-3">⏳</div>
+                <div className="text-sm">Memuat data dari Supabase...</div>
+              </div>
+            </div>
+          ) : (
+            <CalendarGrid weekDays={weekDays} bookings={bookings} rooms={ROOMS}
+              selectedRooms={selectedRooms} currentUser={currentUser}
+              onSlotClick={openNew} onChipClick={b=>setDetailBooking(b)}/>
+          )}
+        </main>
+      </div>
+
+      <BookingModal isOpen={modalOpen} onClose={()=>setModalOpen(false)}
+        onSave={handleSave} onDelete={handleDelete} rooms={ROOMS}
+        initialData={modalInit} bookings={bookings} currentUser={currentUser}/>
+
+      {detailBooking && (
+        <DetailModal booking={detailBooking} room={ROOMS.find(r=>r.id===detailBooking.room_id)}
+          onClose={()=>setDetailBooking(null)} onEdit={openEdit}
+          onDelete={handleDelete} currentUser={currentUser}/>
+      )}
+
+      {notifOpen && <NotifPanel logs={notifLogs} onClose={()=>setNotifOpen(false)} onMarkAllRead={markAllRead} onClearAll={clearAllNotifs}/>}
+      {accountOpen && <AccountModal currentUser={currentUser} onClose={()=>setAccountOpen(false)} onUpdate={u=>{updateUser(u);setAccountOpen(false);addToast({icon:"✅",title:"Profil diperbarui",message:"Data akun berhasil disimpan.",color:"#10b981"});}}/>}
+      <ToastContainer toasts={toasts}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
