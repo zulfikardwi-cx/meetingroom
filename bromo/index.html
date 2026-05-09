@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Room Display — Majoo</title>
+  <script>
+    // Link correct manifest based on ?room= param (must run before page renders)
+    (function() {
+      var p = new URLSearchParams(window.location.search);
+      var r = p.get('room') || '1';
+      var link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = 'manifest-' + r + '.json';
+      document.currentScript.parentNode.appendChild(link);
+    })();
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100vh;
+      overflow: hidden;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+    }
+
+    /* ══════════════════════════════════════════
+       BACKGROUND — foto destinasi per room
+    ══════════════════════════════════════════ */
+    .bg {
+      position: fixed; inset: 0;
+      background-size: cover;
+      background-position: center;
+      transition: opacity 0.8s;
+    }
+
+    /* Room 1 — Raja Ampat */
+    .bg-1 { background-image: url('../bg-raja-ampat.jpg'); }
+    /* Room 2 — Bromo */
+    .bg-2 { background-image: url('../bg-bromo.jpg'); }
+    /* Room 3 — Tegallalang */
+    .bg-3 { background-image: url('../bg-tegallalang.jpg'); }
+    /* Room 4 — Tanjung Tinggi */
+    .bg-4 { background-image: url('../bg-tanjung-tinggi.jpg'); }
+
+    /* Dark overlay — merah saat busy, gelap saat available */
+    .overlay {
+      position: fixed; inset: 0;
+      transition: background 0.6s ease;
+    }
+    .overlay.available { background: linear-gradient(135deg, rgba(0,0,0,0.72) 0%, rgba(0,20,10,0.80) 100%); }
+    .overlay.busy      { background: linear-gradient(135deg, rgba(0,0,0,0.72) 0%, rgba(40,0,0,0.85) 100%); }
+
+    .edge-glow { display: none; }
+
+    /* ══════════════════════════════════════════
+       LAYOUT: Left | Right
+    ══════════════════════════════════════════ */
+    .layout {
+      position: relative; z-index: 5;
+      width: 100%; height: 100vh;
+      display: flex;
+    }
+
+    /* ── LEFT PANEL ── */
+    .left {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 40px 40px 36px 52px;
+    }
+
+    .left-top {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    /* Logo */
+    .logo-wrap { margin-bottom: 32px; }
+    .logo-wrap svg { opacity: 0.95; filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4)); }
+
+    /* Status pill */
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 16px 7px 10px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      margin-bottom: 20px;
+      width: fit-content;
+      transition: background 0.5s, color 0.5s;
+    }
+    .status-pill.available { background: rgba(34,197,94,0.2); color: #86efac; border: 1px solid rgba(34,197,94,0.35); }
+    .status-pill.busy      { background: rgba(239,68,68,0.2);  color: #fca5a5; border: 1px solid rgba(239,68,68,0.35); }
+
+    .pill-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    .available .pill-dot { background: #22c55e; }
+    .busy      .pill-dot { background: #ef4444; }
+
+    @keyframes pulse {
+      0%,100% { opacity:1; transform:scale(1); }
+      50%      { opacity:0.6; transform:scale(1.3); }
+    }
+
+    /* "Available until / Unavailable until" */
+    .until-text {
+      font-size: 17px;
+      font-weight: 500;
+      margin-bottom: 14px;
+      transition: color 0.5s;
+      letter-spacing: 0.2px;
+    }
+    .until-text.available { color: rgba(187,247,208,0.85); }
+    .until-text.busy      { color: rgba(252,165,165,0.85); }
+
+    /* Room name BIG */
+    .room-name {
+      font-size: 80px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -3px;
+      color: white;
+      text-shadow: 0 4px 32px rgba(0,0,0,0.5);
+      margin-bottom: 16px;
+    }
+
+    /* Room meta */
+    .room-meta {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    .meta-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 5px 12px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.7);
+    }
+
+    /* Current meeting card */
+    .current-card {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.12);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-radius: 20px;
+      padding: 24px 28px;
+      margin-top: 32px;
+    }
+
+    .card-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      transition: color 0.5s;
+    }
+    .available .card-label { color: rgba(134,239,172,0.6); }
+    .busy      .card-label { color: rgba(252,165,165,0.6); }
+
+    .meeting-title {
+      font-size: 28px;
+      font-weight: 800;
+      color: white;
+      line-height: 1.2;
+      margin-bottom: 10px;
+    }
+
+    .meeting-info {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .time-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 14px;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 700;
+      color: white;
+      transition: background 0.5s;
+    }
+    .available .time-badge { background: rgba(34,197,94,0.25); }
+    .busy      .time-badge { background: rgba(239,68,68,0.25); }
+
+    .info-item {
+      font-size: 14px;
+      color: rgba(255,255,255,0.5);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* Progress bar */
+    .progress-wrap { margin-top: 18px; }
+    .progress-track {
+      height: 5px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 1s linear, background 0.5s;
+    }
+    .available .progress-fill { background: #22c55e; }
+    .busy      .progress-fill { background: #ef4444; }
+
+    .progress-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: rgba(255,255,255,0.3);
+    }
+
+    /* Bottom: clock */
+    .left-bottom {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+    }
+
+    .clock-big {
+      font-size: 64px;
+      font-weight: 800;
+      letter-spacing: -2px;
+      color: white;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      text-shadow: 0 2px 16px rgba(0,0,0,0.4);
+    }
+
+    .date-small {
+      font-size: 16px;
+      color: rgba(255,255,255,0.45);
+      margin-top: 4px;
+      letter-spacing: 0.3px;
+    }
+
+    /* ── RIGHT PANEL ── */
+    .right {
+      width: 340px;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 40px 36px 36px 16px;
+      gap: 16px;
+    }
+
+    .schedule-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.3);
+      margin-bottom: 4px;
+    }
+
+    .schedule-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .sched-item {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      transition: background 0.3s, border-color 0.3s;
+    }
+
+    .sched-item.now-item {
+      border-color: rgba(239,68,68,0.5);
+      background: rgba(239,68,68,0.1);
+    }
+    .sched-item.avail-item {
+      border-color: rgba(34,197,94,0.3);
+      background: rgba(34,197,94,0.06);
+    }
+
+    .sched-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .sched-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: white;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .sched-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+    .badge-now   { background: #dc2626; color: white; }
+    .badge-next  { background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.5); }
+    .badge-done  { background: rgba(34,197,94,0.12); color: rgba(34,197,94,0.5); }
+    .badge-avail { background: rgba(34,197,94,0.2); color: #86efac; }
+
+    .sched-time {
+      font-size: 13px;
+      color: rgba(255,255,255,0.45);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .sched-booker {
+      font-size: 12px;
+      color: rgba(255,255,255,0.35);
+    }
+
+    /* Empty */
+    .empty-all {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: rgba(255,255,255,0.2);
+    }
+    .empty-icon { font-size: 40px; }
+    .empty-text { font-size: 14px; }
+
+    /* Refresh */
+    .refresh-row {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      font-size: 11px;
+      color: rgba(255,255,255,0.2);
+      margin-top: auto;
+      padding-top: 8px;
+    }
+
+    /* Loading */
+    .loading-overlay {
+      position: fixed; inset: 0; z-index: 50;
+      background: rgba(0,0,0,0.85);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 20px;
+    }
+    .spinner {
+      width: 44px; height: 44px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #2DBDB6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .loading-text { font-size: 15px; color: rgba(255,255,255,0.4); }
+  </style>
+</head>
+<body>
+
+<!-- Background foto -->
+<div class="bg" id="bgEl"></div>
+<!-- Dark overlay -->
+<div class="overlay available" id="overlayEl"></div>
+<!-- Edge glow -->
+<div class="edge-glow available" id="edgeGlow"></div>
+
+<!-- Loading -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="loading-text">Memuat data ruangan...</div>
+</div>
+
+<!-- Main layout -->
+<div class="layout available" id="layoutEl">
+
+  <!-- LEFT -->
+  <div class="left">
+    <div class="left-top">
+
+      <!-- Logo Majoo -->
+      <div class="logo-wrap">
+        <svg width="130" height="39" viewBox="0 0 600 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M401.541 5C418.312 5 433.686 11.9059 444.652 23.0202C455.725 34.1344 462.605 49.4569 462.605 66.2901C462.605 83.1234 455.725 98.5538 444.652 109.56C433.578 120.674 418.312 127.58 401.541 127.58C384.77 127.58 369.396 120.674 358.43 109.56C347.357 98.4459 340.477 83.1234 340.477 66.2901C340.477 49.4569 347.357 34.0265 358.43 23.0202C369.504 11.9059 384.77 5 401.541 5ZM401.541 37.3716C393.585 37.3716 386.382 40.6087 381.222 45.8961C375.954 51.1834 372.729 58.4131 372.729 66.2901C372.729 74.2751 375.954 81.5048 381.222 86.6842C386.49 91.9716 393.693 95.2088 401.541 95.2088C409.497 95.2088 416.7 91.9716 421.86 86.6842C427.128 81.3969 430.353 74.1672 430.353 66.2901C430.353 58.3052 427.128 51.0755 421.86 45.8961C416.7 40.6087 409.497 37.3716 401.541 37.3716Z" fill="url(#lg0)"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M278.122 111.395C278.122 120.351 270.919 127.58 261.996 127.58C255.868 127.58 250.6 124.127 247.805 119.164C238.774 124.559 228.239 127.58 216.95 127.58C200.179 127.58 184.806 120.674 173.84 109.56C162.766 98.4459 155.886 83.1234 155.886 66.2901C155.886 49.4569 162.766 34.0265 173.84 23.0202C184.913 11.9059 200.179 5 216.95 5C233.722 5 249.095 11.9059 260.061 23.0202C270.919 33.9186 277.692 48.9174 278.015 65.4269V111.395H278.122ZM245.87 66.6139V65.8585C245.762 58.0894 242.537 50.9676 237.377 45.7882C232.109 40.5008 224.906 37.2637 217.058 37.2637C209.102 37.2637 201.899 40.5008 196.739 45.7882C191.471 51.0755 188.246 58.3052 188.246 66.1822C188.246 74.1672 191.471 81.3969 196.739 86.5763C202.007 91.8637 209.21 95.1008 217.058 95.1008C225.013 95.1008 232.216 91.8637 237.377 86.5763C242.537 81.5048 245.762 74.491 245.87 66.6139Z" fill="url(#lg1)"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M538.828 5C555.599 5 570.973 11.9059 582.046 23.0202C593.12 34.1344 600 49.4569 600 66.2901C600 83.1234 593.12 98.5538 582.046 109.56C570.973 120.674 555.707 127.58 538.936 127.58C522.164 127.58 506.791 120.674 495.825 109.56C484.752 98.4459 477.871 83.1234 477.871 66.2901C477.871 49.4569 484.752 34.0265 495.825 23.0202C506.683 11.9059 521.949 5 538.828 5ZM538.828 37.3716C530.873 37.3716 523.67 40.6087 518.509 45.8961C513.241 51.1834 510.016 58.4131 510.016 66.2901C510.016 74.2751 513.241 81.5048 518.509 86.6842C523.777 91.9716 530.98 95.2088 538.828 95.2088C546.784 95.2088 553.987 91.9716 559.147 86.6842C564.415 81.3969 567.64 74.1672 567.64 66.2901C567.64 58.3052 564.415 51.0755 559.147 45.8961C553.879 40.6087 546.676 37.3716 538.828 37.3716Z" fill="url(#lg2)"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M293.173 21.1858C293.173 12.2296 300.376 5 309.299 5C318.223 5 325.426 12.2296 325.426 21.1858C325.426 51.3992 325.533 81.3969 325.533 111.502C325.533 143.766 301.666 170.419 270.704 174.627C262.534 176.138 254.471 171.066 252.32 162.865C250.063 154.233 255.116 145.385 263.716 143.011L272.424 140.853C284.465 136.536 293.173 124.991 293.173 111.395C293.066 81.289 293.173 51.2913 293.173 21.1858Z" fill="url(#lg3)"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M140.835 111.61C140.835 120.566 133.632 127.796 124.709 127.796C115.786 127.796 108.583 120.566 108.583 111.61C108.583 91.7558 108.583 72.0091 108.583 52.2625C111.27 52.2625 113.958 52.2625 116.646 52.2625C118.581 52.2625 119.548 50.536 118.151 49.0253C111.915 41.6878 105.572 34.4581 99.337 27.1206C97.7244 24.9625 97.1869 25.3941 95.6818 27.1206C89.4463 34.4581 83.1034 41.6878 76.8679 49.0253C75.4704 50.6439 76.4379 52.2625 78.3731 52.2625C81.0607 52.2625 83.7484 52.2625 86.4361 52.2625C86.4361 72.117 86.5436 91.7558 86.5436 111.61C86.5436 120.566 79.3406 127.796 70.4175 127.796C61.4944 127.796 54.2913 120.566 54.2913 111.61C54.2913 97.6906 54.3989 83.8787 54.3989 70.0668C57.0865 70.0668 59.7742 70.0668 62.4619 70.0668C64.3971 70.0668 65.3646 68.3404 63.967 66.8297C57.7316 59.4921 51.3886 52.2625 45.1532 44.9249C43.5406 42.7668 43.003 43.1984 41.4979 44.9249C35.2625 52.2625 28.9195 59.4921 22.6841 66.8297C21.2865 68.4483 22.2541 70.0668 24.1892 70.0668C26.8769 70.0668 29.5646 70.0668 32.2523 70.0668V111.61C32.2523 120.566 25.0493 127.796 16.1261 127.796C7.20301 127.796 0 120.566 0 111.61V48.3779C0 36.5083 4.83784 25.6099 12.6859 17.7328C20.534 9.85572 31.3922 5 43.3256 5C53.6463 5 63.107 8.66878 70.525 14.7115C77.943 8.66878 87.4037 5 97.7244 5C109.658 5 120.516 9.85572 128.364 17.7328C136.212 25.6099 141.05 36.5083 141.05 48.3779V111.61H140.835Z" fill="url(#lg4)"/>
+          <defs>
+            <linearGradient id="lg0" x1="401.584" y1="123.238" x2="401.584" y2="0.59207" gradientUnits="userSpaceOnUse"><stop stop-color="#2DBDB6"/><stop offset="0.27" stop-color="#2DBDB6"/><stop offset="1" stop-color="#9ACF87"/></linearGradient>
+            <linearGradient id="lg1" x1="217.014" y1="115.229" x2="217.014" y2="-7.41644" gradientUnits="userSpaceOnUse"><stop stop-color="#2DBDB6"/><stop offset="0.27" stop-color="#2DBDB6"/><stop offset="1" stop-color="#9ACF87"/></linearGradient>
+            <linearGradient id="lg2" x1="538.798" y1="119.678" x2="538.798" y2="-2.96815" gradientUnits="userSpaceOnUse"><stop stop-color="#2DBDB6"/><stop offset="0.27" stop-color="#2DBDB6"/><stop offset="1" stop-color="#9ACF87"/></linearGradient>
+            <linearGradient id="lg3" x1="288.653" y1="135.285" x2="288.653" y2="-4.24338" gradientUnits="userSpaceOnUse"><stop stop-color="#2DBDB6"/><stop offset="0.27" stop-color="#2DBDB6"/><stop offset="0.5009" stop-color="#57C1AA"/><stop offset="0.9669" stop-color="#96CE8A"/><stop offset="1" stop-color="#9ACF87"/></linearGradient>
+            <linearGradient id="lg4" x1="70.397" y1="134.015" x2="70.397" y2="-7.48128" gradientUnits="userSpaceOnUse"><stop stop-color="#2DBDB6"/><stop offset="0.27" stop-color="#2DBDB6"/><stop offset="1" stop-color="#9ACF87"/></linearGradient>
+          </defs>
+        </svg>
+      </div>
+
+      <!-- Status pill -->
+      <div class="status-pill available" id="statusPill">
+        <div class="pill-dot"></div>
+        <span id="statusPillText">TERSEDIA</span>
+      </div>
+
+      <!-- Until text -->
+      <div class="until-text available" id="untilText">Siap digunakan</div>
+
+      <!-- Room name -->
+      <div class="room-name" id="roomNameEl">—</div>
+
+      <!-- Room meta -->
+      <div class="room-meta" id="roomMeta"></div>
+
+      <!-- Current meeting card (hidden when available) -->
+      <div class="current-card" id="currentCard" style="display:none">
+        <div class="card-label" id="currentLabel">Sedang Berlangsung</div>
+        <div class="meeting-title" id="currentTitle">—</div>
+        <div class="meeting-info" id="currentInfo"></div>
+        <div class="progress-wrap" id="progressWrap"></div>
+      </div>
+
+    </div>
+
+    <!-- Clock bottom left -->
+    <div class="left-bottom">
+      <div>
+        <div class="clock-big" id="clockEl">--:--</div>
+        <div class="date-small" id="dateEl">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div class="right">
+    <div class="schedule-label">Jadwal Hari Ini</div>
+    <div class="schedule-list" id="scheduleList">
+      <!-- populated by JS -->
+    </div>
+    <div class="refresh-row" id="refreshRow">
+      <span>●</span><span id="refreshText">Memuat...</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─── SUPABASE CONFIG ──────────────────────────────────────────────────────────
+const SUPA_URL = "https://zstapiekxjzoghxpxeqq.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzdGFwaWVreGp6b2doeHB4ZXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxMzQzNzAsImV4cCI6MjA5MzcxMDM3MH0.sRVNhhgmucFTGiLMRVZHbB3d5GtZOXT2kmpfgKi6sjE";
+
+const SUPA_HEADERS = {
+  "apikey": SUPA_KEY,
+  "Authorization": "Bearer " + SUPA_KEY,
+  "Content-Type": "application/json"
+};
+
+async function supaGet(table, params) {
+  const q = params ? "?" + new URLSearchParams(params) : "";
+  const r = await fetch(`${SUPA_URL}/rest/v1/${table}${q}`, { headers: SUPA_HEADERS });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ─── ROOMS CONFIG ─────────────────────────────────────────────────────────────
+const REFRESH_MS = 2 * 60 * 1000;
+
+const ROOMS = {
+  1: { name: "Raja Ampat",     capacity: "Maks. 7 orang", facilities: "TV · Whiteboard",                    bgClass: "bg-1" },
+  2: { name: "Bromo",          capacity: "Maks. 9 orang", facilities: "TV · Whiteboard · Camera Conference", bgClass: "bg-2" },
+  3: { name: "Tegallalang",    capacity: "Maks. 6 orang", facilities: "TV · Whiteboard · Camera Conference", bgClass: "bg-3" },
+  4: { name: "Tanjung Tinggi", capacity: "Maks. 6 orang", facilities: "TV · Whiteboard",                    bgClass: "bg-4" },
+};
+
+const HARI  = ["Minggu","Senin","Selasa","Rabu","Kamis","Jumat","Sabtu"];
+const BULAN = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+
+// ─── ROOM FROM URL ────────────────────────────────────────────────────────────
+const params  = new URLSearchParams(location.search);
+const ROOM_ID = 2;
+const ROOM    = ROOMS[ROOM_ID] || ROOMS[1];
+
+// Apply background & title
+document.getElementById("bgEl").classList.add(ROOM.bgClass);
+document.getElementById("roomNameEl").textContent = ROOM.name;
+document.title = ROOM.name + " — Room Display";
+
+// Room meta chips
+document.getElementById("roomMeta").innerHTML =
+  `<div class="meta-chip">👥 ${ROOM.capacity}</div>` +
+  `<div class="meta-chip">🖥 ${ROOM.facilities}</div>`;
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function toMin(hhmm) {
+  if (!hhmm) return 0;
+  const [h, m] = String(hhmm).slice(0,5).split(":").map(Number);
+  return h * 60 + m;
+}
+function nowMin() { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); }
+function todayStr() {
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+function fmt5(ts) {
+  // Format "HH:MM:SS" → "HH:MM"
+  return String(ts||"").slice(0,5);
+}
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ─── FETCH BOOKINGS FROM SUPABASE ─────────────────────────────────────────────
+// Kolom tabel bookings: id, room_id, title, date, start_time, end_time,
+//                       attendees, notes, booked_by_name, booked_by_email, source
+async function fetchBookingsWithUsers() {
+  const today = todayStr();
+
+  const data = await supaGet("bookings", {
+    "room_id": `eq.${ROOM_ID}`,
+    "date":    `eq.${today}`,
+    "select":  "id,title,start_time,end_time,booked_by_name,booked_by_email,attendees",
+    "order":   "start_time.asc"
+  });
+
+  return data.map(b => ({
+    id:     b.id,
+    title:  b.title || "(Tanpa Judul)",
+    start:  fmt5(b.start_time),
+    end:    fmt5(b.end_time),
+    booker:    b.booked_by_name || b.booked_by_email || "",
+    attendees: b.attendees || "",
+  }));
+}
+
+// ─── CLOCK ────────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  document.getElementById("clockEl").textContent =
+    String(now.getHours()).padStart(2,"0") + ":" + String(now.getMinutes()).padStart(2,"0");
+  document.getElementById("dateEl").textContent =
+    HARI[now.getDay()] + ", " + now.getDate() + " " + BULAN[now.getMonth()] + " " + now.getFullYear();
+}
+updateClock();
+setInterval(updateClock, 1000);
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+let cachedBookings = [];
+
+function setMode(mode) { // "available" | "busy"
+  ["overlayEl","edgeGlow","layoutEl"].forEach(id => {
+    const el = document.getElementById(id);
+    el.classList.remove("available","busy");
+    el.classList.add(mode);
+  });
+  const pill = document.getElementById("statusPill");
+  pill.classList.remove("available","busy");
+  pill.classList.add(mode);
+  document.getElementById("untilText").classList.remove("available","busy");
+  document.getElementById("untilText").classList.add(mode);
+}
+
+function renderDisplay(bookings) {
+  const now = nowMin();
+
+  // Find current & next
+  const current  = bookings.find(b => toMin(b.start) <= now && now < toMin(b.end));
+  const upcoming = bookings.filter(b => toMin(b.end) > now);
+  const next     = upcoming.find(b => toMin(b.start) > now);
+
+  const isBusy = !!current;
+  setMode(isBusy ? "busy" : "available");
+
+  // Status pill
+  document.getElementById("statusPillText").textContent = isBusy ? "OCCUPIED" : "AVAILABLE";
+
+  // Until text
+  let untilMsg = "";
+  if (isBusy) {
+    untilMsg = "Occupied until " + current.end;
+  } else if (next) {
+    untilMsg = "Available until " + next.start;
+  } else {
+    untilMsg = "Available all day";
+  }
+  document.getElementById("untilText").textContent = untilMsg;
+
+  // Current meeting card
+  const card = document.getElementById("currentCard");
+  if (isBusy) {
+    card.style.display = "block";
+    document.getElementById("currentTitle").textContent = current.title;
+    let infoHtml = `<div class="time-badge">🕐 ${current.start} – ${current.end}</div>`;
+    if (current.booker) infoHtml += `<div class="info-item">👤 ${esc(current.booker)}</div>`;
+    infoHtml += `<div class="info-item">👥 ${current.attendees ? esc(current.attendees) : "-"}</div>`;
+    document.getElementById("currentInfo").innerHTML = infoHtml;
+
+    // Progress bar
+    const startM = toMin(current.start), endM = toMin(current.end);
+    const pct    = Math.min(100, Math.round(((now - startM) / (endM - startM)) * 100));
+    const rem    = endM - now;
+    const remStr = rem >= 60
+      ? Math.floor(rem/60) + "j " + (rem%60 > 0 ? rem%60 + "m" : "")
+      : rem + "m lagi";
+    document.getElementById("progressWrap").innerHTML = `
+      <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="progress-labels"><span>${current.start}</span><span>${remStr}</span><span>${current.end}</span></div>`;
+  } else {
+    card.style.display = "none";
+  }
+
+  // Schedule list (right panel)
+  const list = document.getElementById("scheduleList");
+  if (bookings.length === 0) {
+    list.innerHTML = `<div class="empty-all"><div class="empty-icon">✨</div><div class="empty-text">Tidak ada meeting hari ini</div></div>`;
+  } else {
+    list.innerHTML = bookings.slice(0, 6).map(b => {
+      const isNow  = toMin(b.start) <= now && now < toMin(b.end);
+      const isPast = toMin(b.end) <= now;
+      const itemClass = isNow ? "now-item" : (!isPast && b === next ? "avail-item" : "");
+      const badge = isNow
+        ? `<span class="sched-badge badge-now">NOW</span>`
+        : isPast
+          ? `<span class="sched-badge badge-done">DONE</span>`
+          : (b === next ? `<span class="sched-badge badge-next">NEXT</span>` : "");
+      return `
+        <div class="sched-item ${itemClass}" style="opacity:${isPast ? 0.35 : 1}">
+          <div class="sched-header">
+            <div class="sched-title">${esc(b.title)}</div>
+            ${badge}
+          </div>
+          <div class="sched-time">${b.start} – ${b.end}</div>
+          ${b.booker ? `<div class="sched-booker">👤 ${esc(b.booker)}</div>` : ""}
+        </div>`;
+    }).join("");
+  }
+
+  // Refresh timestamp
+  const t = new Date();
+  document.getElementById("refreshText").textContent =
+    "Diperbarui " + String(t.getHours()).padStart(2,"0") + ":" + String(t.getMinutes()).padStart(2,"0");
+}
+
+// ─── DEMO MODE (?demo=1 di URL untuk preview tampilan OCCUPIED) ───────────────
+const isDemo = params.get("demo") === "1";
+
+function getDemoBookings() {
+  const now  = new Date();
+  const hh   = now.getHours();
+  const mm   = now.getMinutes();
+  const pad  = n => String(n).padStart(2,"0");
+  const today = todayStr();
+
+  const startHAdj = mm < 30 ? hh - 1 : hh;
+  const startMAdj = mm < 30 ? 60 + mm - 30 : mm - 30;
+  const endHAdj   = mm + 30 >= 60 ? hh + 1 : hh;
+  const endMAdj   = mm + 30 >= 60 ? mm + 30 - 60 : mm + 30;
+
+  return [
+    {
+      id: "demo1", title: "Product Sync Meeting",
+      start: pad(Math.max(0, startHAdj)) + ":" + pad(startMAdj),
+      end:   pad(Math.min(23, endHAdj))  + ":" + pad(endMAdj),
+      booker: "Zulfikar Dwiansyah", dept: "Customer Experience",
+    },
+    {
+      id: "demo2", title: "1-on-1 Review",
+      start: pad(Math.min(23, endHAdj))   + ":" + pad(endMAdj),
+      end:   pad(Math.min(23, endHAdj+2)) + ":" + pad(endMAdj),
+      booker: "Firjayanti", dept: "People",
+    },
+    {
+      id: "demo3", title: "Investor Call",
+      start: pad(Math.min(23, endHAdj+2)) + ":" + pad(endMAdj),
+      end:   pad(Math.min(23, endHAdj+3)) + ":" + pad(endMAdj),
+      booker: "Tim Eksekutif", dept: "Finance",
+    },
+  ];
+}
+
+// ─── LOAD & RENDER ────────────────────────────────────────────────────────────
+async function loadAndRender() {
+  try {
+    if (isDemo) {
+      cachedBookings = getDemoBookings();
+    } else {
+      cachedBookings = await fetchBookingsWithUsers();
+    }
+    renderDisplay(cachedBookings);
+  } catch(err) {
+    console.error("Gagal memuat data:", err);
+    // Tetap render dengan data yang ada (kosong)
+    renderDisplay([]);
+  } finally {
+    document.getElementById("loadingOverlay").style.display = "none";
+  }
+}
+
+function rerender() { renderDisplay(cachedBookings); }
+
+loadAndRender();
+setInterval(rerender, 30 * 1000);          // re-render status tiap 30 detik
+setInterval(loadAndRender, REFRESH_MS);    // fetch ulang dari Supabase tiap 2 menit
+
+// ─── AUTO FULLSCREEN ──────────────────────────────────────────────────────────
+function goFullscreen() {
+  const el = document.documentElement;
+  if (el.requestFullscreen)            el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  else if (el.mozRequestFullScreen)    el.mozRequestFullScreen();
+  else if (el.msRequestFullscreen)     el.msRequestFullscreen();
+}
+
+window.addEventListener("load", () => { setTimeout(goFullscreen, 500); });
+document.addEventListener("click",      goFullscreen, { once: true });
+document.addEventListener("touchstart", goFullscreen, { once: true });
+</script>
+</body>
+</html>
