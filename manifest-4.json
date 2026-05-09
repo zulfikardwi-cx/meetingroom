@@ -1,0 +1,17 @@
+{
+  "name": "Room Display — Tanjung Tinggi",
+  "short_name": "Tanjung Tinggi",
+  "description": "Meeting room display for Tanjung Tinggi room",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "start_url": "/meetingroom/room-display.html?room=4",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "https://majoomeetingroom.netlify.app/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}

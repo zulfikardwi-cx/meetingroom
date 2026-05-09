@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Meeting Room Booking</title>
+  <title>RoomBook — Meeting Room Booking Majoo</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -16,9 +16,9 @@
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #f1f5f9; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-    @keyframes slideIn { from { transform: translateX(120%); opacity:0; } to { transform: translateX(0); opacity:1; } }
-    @keyframes slideOut { from { transform: translateX(0); opacity:1; } to { transform: translateX(120%); opacity:0; } }
-    .toast-in  { animation: slideIn 0.3s ease forwards; }
+    @keyframes slideIn  { from { transform:translateX(120%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+    @keyframes slideOut { from { transform:translateX(0); opacity:1; } to { transform:translateX(120%); opacity:0; } }
+    .toast-in  { animation: slideIn  0.3s ease forwards; }
     .toast-out { animation: slideOut 0.3s ease forwards; }
   </style>
 </head>
@@ -26,9 +26,232 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useMemo, useEffect, useCallback, useRef } = React;
+const { useState, useMemo, useEffect, useCallback } = React;
 
-// ─── DATA ─────────────────────────────────────────────────────────────────────
+// ─── STORAGE KEY ──────────────────────────────────────────────────────────────
+const STORAGE_KEYS = {
+  bookings: "roombook_bookings",
+  session:  "roombook_session",
+};
+
+// ─── GOOGLE SHEET CONFIG ──────────────────────────────────────────────────────
+const SHEET_ID = "1QbM-K2hGJPE0J8jSi8NsOs2Hj5kt0A-3NY_1-LXNSqo";
+
+// Mapping nama room → id
+const ROOM_NAME_MAP = {
+  "Raja Ampat": 1, "Bromo": 2, "Tegallalang": 3, "Tanjung Tinggi": 4,
+  // Alias typo — Google Form kadang kirim dengan 1 huruf l
+  "Tegalalang": 3, "Raja ampat": 1, "raja ampat": 1,
+  "Tanjung tinggi": 4, "tanjung tinggi": 4, "bromo": 2,
+};
+
+function sheetUrl(tab) {
+  return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(tab)}`;
+}
+
+// Parse satu sheet tab dan kembalikan array bookings
+async function parseSheetTab(tab, mapFn) {
+  try {
+    const res  = await fetch(sheetUrl(tab));
+    const text = await res.text();
+    const json = JSON.parse(text.replace(/^[^{]+/, "").replace(/\);?\s*$/, ""));
+    const rows = json?.table?.rows || [];
+    const cols = json?.table?.cols || [];
+    if (rows.length === 0) return [];
+    const colIdx = {};
+    cols.forEach((c, i) => { colIdx[c.label] = i; });
+    const v = (row, key) => {
+      const i = colIdx[key];
+      if (i === undefined) return "";
+      const cell = row.c && row.c[i];
+      if (!cell || cell.v === null || cell.v === undefined) return "";
+      // Untuk kolom tanggal: gviz pakai Date(Y,M,D) UTC, bisa off by 1 hari di WIB.
+      // Gunakan cell.f (formatted) jika tersedia karena sudah dalam timezone Sheet.
+      const sv = String(cell.v);
+      if (sv.match(/^Date\(\d+,\d+,\d+\)$/) && cell.f) return String(cell.f);
+      return sv;
+    };
+    return rows.map((row, ri) => mapFn(row, ri, v)).filter(Boolean);
+  } catch (err) {
+    console.warn(`Gagal baca sheet "${tab}":`, err.message);
+    return [];
+  }
+}
+
+// Helper: parse waktu dari Google Sheets gviz API
+// gviz mengirim waktu sebagai "Date(1899,11,30,H,M,S)" — epoch Excel untuk time-only values
+function parseTime(val) {
+  if (!val && val !== 0) return "";
+
+  // Numeric fraction of day: gviz kadang kirim 0.6666... untuk 4:00 PM
+  if (typeof val === "number") {
+    const totalMin = Math.round(val * 24 * 60);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return String(h).padStart(2,"0") + ":" + String(m).padStart(2,"0");
+  }
+
+  const s = String(val).trim();
+
+  // "Date(1899,11,30,16,0,0)" — format gviz untuk time-only (jam saja)
+  // "Date(2026,4,6,16,0,0)"   — format gviz untuk datetime
+  const gviz = s.match(/Date\(\d+,\d+,\d+,(\d+),(\d+)/);
+  if (gviz) return String(parseInt(gviz[1])).padStart(2,"0") + ":" + String(gviz[2]).padStart(2,"0");
+
+  // "10:00:00 AM" / "4:00:00 PM" / "10:00 AM" / "4:00 PM"
+  const ampm = s.match(/^(\d{1,2}):(\d{2})(?::\d+)?\s*(AM|PM)$/i);
+  if (ampm) {
+    let h = parseInt(ampm[1]);
+    const m = ampm[2];
+    const period = ampm[3].toUpperCase();
+    if (period === "AM" && h === 12) h = 0;
+    if (period === "PM" && h !== 12) h += 12;
+    return String(h).padStart(2,"0") + ":" + m;
+  }
+
+  // "16:00:00" → "16:00"
+  const withSec = s.match(/^(\d{1,2}):(\d{2}):\d{2}$/);
+  if (withSec) return String(parseInt(withSec[1])).padStart(2,"0") + ":" + withSec[2];
+
+  // "16:00" atau "9:00"
+  const plain = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (plain) return String(parseInt(plain[1])).padStart(2,"0") + ":" + plain[2];
+
+  return s;
+}
+
+// Helper: parse tanggal dari gviz (bisa "Date(2026,4,6)", "2026-05-06", "5/6/2026", dll)
+function parseDate(val) {
+  if (!val) return "";
+  const s = String(val).trim();
+
+  // sudah YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // "Date(2026,4,6)" — bulan 0-indexed, JANGAN pakai new Date() karena timezone shift
+  const gviz = s.match(/Date\((\d+),(\d+),(\d+)/);
+  if (gviz) {
+    const y = gviz[1];
+    const mo = String(parseInt(gviz[2]) + 1).padStart(2, "0");
+    const d  = String(parseInt(gviz[3])).padStart(2, "0");
+    return `${y}-${mo}-${d}`;
+  }
+
+  // "5/6/2026" format M/D/YYYY dari Google Sheets display
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (mdy) {
+    return `${mdy[3]}-${String(mdy[1]).padStart(2,"0")}-${String(mdy[2]).padStart(2,"0")}`;
+  }
+
+  // "2026-05-06T..." ISO string — ambil bagian tanggal saja tanpa konversi timezone
+  if (s.length >= 10 && s[4] === "-") return s.slice(0, 10);
+
+  return s;
+}
+
+// Ambil bookings dari Google Sheet
+// Membaca 2 tab: "RoomBook Data" (Apps Script, format bersih) dan
+// "Booking Response" (Google Form responses, format kolom bahasa Indonesia)
+async function syncFromSheet() {
+  // ── Tab 1: "RoomBook Data" — ditulis Apps Script, format bersih
+  const fromAppsScript = await parseSheetTab("RoomBook Data", (row, ri, v) => {
+    const namaRoom  = v(row, "namaRoom");
+    const roomId    = parseInt(v(row, "roomId")) || ROOM_NAME_MAP[namaRoom] || 0;
+    const date      = parseDate(v(row, "tanggal"));
+    const startTime = parseTime(v(row, "jamMulai"));
+    const endTime   = parseTime(v(row, "jamSelesai"));
+    if (!roomId || !date || !startTime || !endTime) return null;
+    return {
+      id:           v(row, "id") || ("rb-" + ri),
+      roomId, title: v(row, "judulMeeting") || "(Tanpa Judul)",
+      date, startTime, endTime,
+      attendees:    v(row, "namaPeserta"),
+      notes:        [v(row,"departemen") && "Dept: "+v(row,"departemen"), v(row,"catatan")].filter(Boolean).join(" | "),
+      bookedById: null, bookedByName: v(row, "namaLengkap") || "Google Form",
+      source: "google-form",
+    };
+  });
+
+  // ── Tab 2: "Booking Response" — sheet otomatis Google Form
+  const fromForm = await parseSheetTab("Booking Response", (row, ri, v) => {
+    const namaRoom  = v(row, "Pilih Ruang Meeting").trim();
+    const roomId    = ROOM_NAME_MAP[namaRoom]
+                   || Object.entries(ROOM_NAME_MAP).find(([k])=>k.toLowerCase()===namaRoom.toLowerCase())?.[1]
+                   || 0;
+    const date      = parseDate(v(row, "Tanggal Meeting"));
+    const rawStart  = v(row, "Waktu Mulai");
+    const rawEnd    = v(row, "Waktu Selesai");
+    console.log("[DEBUG row "+ri+"] namaRoom="+namaRoom+" roomId="+roomId+" date="+date+" rawStart="+JSON.stringify(rawStart)+" rawEnd="+JSON.stringify(rawEnd));
+    const startTime = parseTime(rawStart);
+    const endTime   = parseTime(rawEnd);
+    console.log("[DEBUG row "+ri+"] startTime="+startTime+" endTime="+endTime);
+    if (!roomId || !date || !startTime || !endTime) { console.log("[DEBUG row "+ri+"] SKIPPED — roomId="+roomId+" date="+date+" startTime="+startTime+" endTime="+endTime); return null; }
+    const ts = v(row, "Timestamp") || String(ri);
+    return {
+      id:           "form-" + ts.replace(/[^0-9]/g, ""),
+      roomId, title: v(row, "Nama / Judul Meeting") || "(Tanpa Judul)",
+      date, startTime, endTime,
+      attendees:    v(row, "Nama Peserta"),
+      notes:        v(row, "Divisi") ? "Divisi: " + v(row, "Divisi") : "",
+      bookedById: null,
+      bookedByName: v(row, "Nama Lengkap *") || v(row, "Nama Lengkap") || "Google Form",
+      source: "google-form",
+    };
+  });
+
+  // Gabungkan, hindari duplikat by id
+  const all  = [...fromAppsScript, ...fromForm];
+  const seen = new Set();
+  return all.filter(b => { if (seen.has(b.id)) return false; seen.add(b.id); return true; });
+}
+
+// Merge: Sheet bookings + localStorage bookings
+// Prioritas: booking yang sudah ada duluan menang, yang baru ditolak jika bentrok
+// Collision = ruangan sama + tanggal sama + waktu overlap
+function mergeBookings(sheetList, localList) {
+  const cancelledIds = loadCancelledIds();
+
+  // Booking lokal non-form (dibuat langsung di app) — prioritas tertinggi
+  const localNonForm = localList.filter(b =>
+    b.source !== "google-form" && !cancelledIds.has(String(b.id))
+  );
+  const localIds = new Set(localNonForm.map(b => String(b.id)));
+
+  // Booking lama dari form yang sudah ada di localList (sudah lolos sebelumnya)
+  const localFormOld = localList.filter(b =>
+    b.source === "google-form" && !cancelledIds.has(String(b.id))
+  );
+  const localFormIds = new Set(localFormOld.map(b => String(b.id)));
+
+  // Booking baru dari sheet yang belum ada di local
+  const sheetNew = sheetList.filter(b =>
+    !cancelledIds.has(String(b.id)) &&
+    !localIds.has(String(b.id)) &&
+    !localFormIds.has(String(b.id))
+  );
+
+  // Accepted list: mulai dari semua booking yang sudah ada (local + form lama)
+  const accepted = [...localNonForm, ...localFormOld];
+
+  // Tambahkan booking baru dari sheet satu per satu — tolak jika bentrok
+  for (const b of sheetNew) {
+    const conflict = findConflict(accepted, b);
+    if (conflict) {
+      // Ruangan sama + waktu overlap → tolak booking baru, simpan ke cancelled
+      addCancelledId(b.id);
+      console.warn(
+        `[Collision] Booking "${b.title}" di ${b.date} ${b.startTime}-${b.endTime} ` +
+        `ditolak karena ruangan sudah dibooking: "${conflict.title}" ${conflict.startTime}-${conflict.endTime}`
+      );
+    } else {
+      accepted.push(b);
+    }
+  }
+
+  return accepted;
+}
+
+// ─── MASTER DATA ──────────────────────────────────────────────────────────────
 const ROOMS = [
   { id: 1, name: "Raja Ampat",     capacity: 7, colorHex: "#3b82f6", facilities: ["TV","Whiteboard"] },
   { id: 2, name: "Bromo",          capacity: 9, colorHex: "#10b981", facilities: ["TV","Whiteboard","Camera Conference"] },
@@ -36,190 +259,396 @@ const ROOMS = [
   { id: 4, name: "Tanjung Tinggi", capacity: 6, colorHex: "#f59e0b", facilities: ["TV","Whiteboard"] },
 ];
 
-const USERS = [
-  { id: 1, name: "Zulfikar Dwi", email: "zulfikar.dwi@majoo.id", avatar: "ZD", role: "Admin" },
-  { id: 2, name: "Firjayanti",   email: "firjayanti@majoo.id",    avatar: "FJ", role: "Employee" },
+const ADMIN_EMAILS = ["zulfikar.dwi@majoo.id", "firjayanti@majoo.id"];
+
+const DEFAULT_USERS = [
+  { id: 1, name: "Zulfikar Dwi", email: "zulfikar.dwi@majoo.id", avatar: "ZD", role: "Admin", password: "admin123" },
+  { id: 2, name: "Firjayanti",   email: "firjayanti@majoo.id",    avatar: "FJ", role: "Admin", password: "admin123" },
 ];
 
-// Demo passwords (in real app these would be hashed on server)
-const USER_PASSWORDS = { "zulfikar.dwi@majoo.id": "admin123", "firjayanti@majoo.id": "pass123" };
+function loadUsers() {
+  try {
+    const raw = localStorage.getItem("roombook_users");
+    return raw ? JSON.parse(raw) : DEFAULT_USERS;
+  } catch { return DEFAULT_USERS; }
+}
+function saveUsers(list) {
+  try { localStorage.setItem("roombook_users", JSON.stringify(list)); } catch {}
+}
+// Inisialisasi users di localStorage kalau belum ada
+if (!localStorage.getItem("roombook_users")) saveUsers(DEFAULT_USERS);
 
 const FACILITY_ICONS = { "TV": "📺", "Whiteboard": "📋", "Camera Conference": "🎥" };
 
-function todayStr(offsetDays = 0) {
+// ─── SEED BOOKINGS — kosong, tidak ada data demo ─────────────────────────────
+function makeSeedBookings() {
+  return [];
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function localDateStr(d) {
+  // Pakai getFullYear/Month/Date (timezone lokal) bukan toISOString() (UTC)
+  const y  = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${dd}`;
+}
+function offsetDay(n) {
   const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() + n);
+  return localDateStr(d);
 }
-
-function getWeekDays(baseDate) {
-  const d = new Date(baseDate);
+function todayStr() { return offsetDay(0); }
+function toMin(t) { const [h,m] = t.split(":").map(Number); return h*60+m; }
+function addHour(t) { const [h,m] = t.split(":").map(Number); return `${String(Math.min(h+1,20)).padStart(2,"0")}:${String(m).padStart(2,"0")}`; }
+function fmtMonthYear(d) { return d.toLocaleDateString("id-ID",{month:"long",year:"numeric"}); }
+function getWeekDays(base) {
+  const d   = new Date(base);
+  const mon = new Date(d);
   const day = d.getDay();
-  const monday = new Date(d);
-  monday.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
-  return Array.from({ length: 7 }, (_, i) => {
-    const dd = new Date(monday);
-    dd.setDate(monday.getDate() + i);
-    return dd;
+  mon.setDate(d.getDate() - (day===0 ? 6 : day-1));
+  return Array.from({length:7},(_,i)=>{ const dd=new Date(mon); dd.setDate(mon.getDate()+i); return dd; });
+}
+const HOURS = Array.from({length:13},(_,i)=>`${String(i+8).padStart(2,"0")}:00`);
+
+// ─── localStorage helpers ─────────────────────────────────────────────────────
+function loadBookings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.bookings);
+    return raw ? JSON.parse(raw) : makeSeedBookings();
+  } catch { return makeSeedBookings(); }
+}
+function saveBookings(list) {
+  try { localStorage.setItem(STORAGE_KEYS.bookings, JSON.stringify(list)); } catch {}
+}
+
+// ─── CANCELLED IDS — booking yang dibatalkan tidak muncul lagi meski sync ─────
+// Simpan di KEDUA tempat: localStorage (persist antar sesi) + key khusus yang tidak ikut clear
+const CANCELLED_KEY = "roombook_cancelled_ids"; // key khusus, jangan di-clear sembarangan
+function loadCancelledIds() {
+  try {
+    const a = JSON.parse(localStorage.getItem("roombook_cancelled") || "[]");
+    const b = JSON.parse(localStorage.getItem(CANCELLED_KEY) || "[]");
+    return new Set([...a, ...b]);
+  }
+  catch { return new Set(); }
+}
+function saveCancelledIds(set) {
+  try {
+    const arr = JSON.stringify([...set]);
+    localStorage.setItem("roombook_cancelled", arr);
+    localStorage.setItem(CANCELLED_KEY, arr);
+  } catch {}
+}
+function addCancelledId(id) {
+  const s = loadCancelledIds(); s.add(String(id)); saveCancelledIds(s);
+}
+// Reset hanya bookings, JAGA cancelled IDs tetap ada
+function resetBookingsOnly() {
+  const cancelled = localStorage.getItem(CANCELLED_KEY);
+  const cancelledOld = localStorage.getItem("roombook_cancelled");
+  localStorage.clear();
+  if (cancelled) localStorage.setItem(CANCELLED_KEY, cancelled);
+  if (cancelledOld) localStorage.setItem("roombook_cancelled", cancelledOld);
+  location.reload();
+}
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.session);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveSession(user) {
+  try {
+    if (user) localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(user));
+    else       localStorage.removeItem(STORAGE_KEYS.session);
+  } catch {}
+}
+
+// ─── CONFLICT DETECTION ───────────────────────────────────────────────────────
+function findConflict(bookings, candidate) {
+  const cS = toMin(candidate.startTime), cE = toMin(candidate.endTime);
+  return bookings.find(b => {
+    if (b.id === candidate.id) return false;
+    if (b.roomId !== candidate.roomId || b.date !== candidate.date) return false;
+    return cS < toMin(b.endTime) && cE > toMin(b.startTime);
+  }) || null;
+}
+
+// ─── SIDE-BY-SIDE COLUMN LAYOUT ───────────────────────────────────────────────
+function computeColumns(dayBookings) {
+  const sorted = [...dayBookings].sort((a,b)=>toMin(a.startTime)-toMin(b.startTime));
+  const colEnds = [];
+  const withCol = sorted.map(b => {
+    const bS = toMin(b.startTime), bE = toMin(b.endTime);
+    let col = colEnds.findIndex(e => e <= bS);
+    if (col === -1) { col = colEnds.length; colEnds.push(bE); } else { colEnds[col] = bE; }
+    return { ...b, col };
+  });
+  return withCol.map(b => {
+    const bS = toMin(b.startTime), bE = toMin(b.endTime);
+    const overlapping = withCol.filter(o => bS < toMin(o.endTime) && bE > toMin(o.startTime));
+    return { ...b, totalCols: Math.max(...overlapping.map(o=>o.col))+1 };
   });
 }
 
-const HOURS = Array.from({ length: 13 }, (_, i) => `${String(i + 8).padStart(2, "0")}:00`);
-
-function timeToMinutes(t) {
-  const [h, m] = t.split(":").map(Number);
-  return h * 60 + m;
+// ─── TOAST ────────────────────────────────────────────────────────────────────
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const add = useCallback(({ icon="ℹ️", title, message, color }) => {
+    const id = Date.now();
+    setToasts(p=>[...p,{id,icon,title,message,color,leaving:false}]);
+    setTimeout(()=>{
+      setToasts(p=>p.map(t=>t.id===id?{...t,leaving:true}:t));
+      setTimeout(()=>setToasts(p=>p.filter(t=>t.id!==id)),350);
+    },3500);
+  },[]);
+  return { toasts, add };
 }
-
-function formatMonthYear(d) {
-  return d.toLocaleDateString("id-ID", { month: "long", year: "numeric" });
-}
-
-function addHour(t) {
-  const [h, m] = t.split(":").map(Number);
-  return `${String(Math.min(h + 1, 20)).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-// ── CONFLICT DETECTION ────────────────────────────────────────────────────────
-function hasConflict(bookings, candidate) {
-  const cStart = timeToMinutes(candidate.startTime);
-  const cEnd   = timeToMinutes(candidate.endTime);
-  return bookings.some(b => {
-    if (b.id === candidate.id) return false;         // same booking (edit)
-    if (b.roomId !== candidate.roomId) return false; // different room
-    if (b.date   !== candidate.date)   return false; // different day
-    const bStart = timeToMinutes(b.startTime);
-    const bEnd   = timeToMinutes(b.endTime);
-    return cStart < bEnd && cEnd > bStart;           // overlap
-  });
-}
-
-// ── TOAST SYSTEM ──────────────────────────────────────────────────────────────
 function ToastContainer({ toasts }) {
   return (
     <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none">
-      {toasts.map(t => (
-        <div key={t.id} className={`pointer-events-auto flex items-start gap-3 bg-white border rounded-xl shadow-lg px-4 py-3 min-w-[280px] max-w-sm ${t.leaving ? "toast-out" : "toast-in"}`}
-          style={{ borderColor: t.color || "#e2e8f0" }}>
+      {toasts.map(t=>(
+        <div key={t.id} className={`pointer-events-auto flex items-start gap-3 bg-white border rounded-xl shadow-lg px-4 py-3 min-w-[280px] max-w-sm ${t.leaving?"toast-out":"toast-in"}`}
+          style={{borderColor:t.color||"#e2e8f0"}}>
           <span className="text-xl flex-shrink-0">{t.icon}</span>
-          <div className="flex-1">
-            <div className="font-semibold text-sm text-slate-800">{t.title}</div>
-            <div className="text-xs text-slate-500 mt-0.5">{t.message}</div>
-          </div>
+          <div><div className="font-semibold text-sm text-slate-800">{t.title}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{t.message}</div></div>
         </div>
       ))}
     </div>
   );
 }
 
-function useToast() {
-  const [toasts, setToasts] = useState([]);
-  const addToast = useCallback(({ icon = "ℹ️", title, message, color }) => {
-    const id = Date.now();
-    setToasts(prev => [...prev, { id, icon, title, message, color, leaving: false }]);
-    setTimeout(() => {
-      setToasts(prev => prev.map(t => t.id === id ? { ...t, leaving: true } : t));
-      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 350);
-    }, 3500);
-  }, []);
-  return { toasts, addToast };
-}
-
-// ── LOGIN SCREEN ──────────────────────────────────────────────────────────────
+// ─── LOGIN / REGISTER / LUPA PASSWORD ────────────────────────────────────────
 function LoginScreen({ onLogin }) {
-  const [email, setEmail]       = useState("zulfikar.dwi@majoo.id");
+  const [tab,      setTab]      = useState("login"); // "login" | "register"
+  const [forgot,   setForgot]   = useState(false);
+  const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError]       = useState("");
-  const [loading, setLoading]   = useState(false);
+  const [name,     setName]     = useState("");
+  const [newPass,  setNewPass]  = useState("");
+  const [confirm,  setConfirm]  = useState("");
+  const [error,    setError]    = useState("");
+  const [success,  setSuccess]  = useState("");
+  const [loading,  setLoading]  = useState(false);
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    setError("");
-    setLoading(true);
-    setTimeout(() => {
-      const user = USERS.find(u => u.email === email);
-      if (user && USER_PASSWORDS[email] === password) {
-        onLogin(user);
-      } else {
-        setError("Email atau password salah.");
-        setLoading(false);
-      }
-    }, 600);
+  const switchTab = (t) => { setTab(t); setForgot(false); setError(""); setSuccess(""); setEmail(""); setPassword(""); setName(""); setNewPass(""); setConfirm(""); };
+  const openForgot = () => { setForgot(true); setError(""); setSuccess(""); setEmail(""); setNewPass(""); setConfirm(""); };
+  const closeForgot = () => { setForgot(false); setError(""); setSuccess(""); };
+
+  const handleLogin = e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    setTimeout(()=>{
+      const users = loadUsers();
+      const user = users.find(u => u.email === email && u.password === password);
+      if (user) { const {password:_, ...safe} = user; onLogin(safe); }
+      else { setError("Email atau password salah."); setLoading(false); }
+    }, 500);
   };
+
+  const handleRegister = e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    setTimeout(()=>{
+      const users = loadUsers();
+      if (users.find(u => u.email === email)) { setError("Email sudah terdaftar."); setLoading(false); return; }
+      if (password.length < 6) { setError("Password minimal 6 karakter."); setLoading(false); return; }
+      if (password !== confirm) { setError("Konfirmasi password tidak cocok."); setLoading(false); return; }
+      const initials = name.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+      const role = ADMIN_EMAILS.includes(email) ? "Admin" : "Employee";
+      const newUser = { id: Date.now(), name, email, avatar: initials, role, password };
+      saveUsers([...users, newUser]);
+      setSuccess("Akun berhasil dibuat! Silakan masuk.");
+      setLoading(false);
+      setTimeout(()=>switchTab("login"), 1500);
+    }, 500);
+  };
+
+  const handleReset = e => {
+    e.preventDefault(); setError(""); setLoading(true);
+    setTimeout(()=>{
+      const users = loadUsers();
+      const idx = users.findIndex(u => u.email === email);
+      if (idx === -1) { setError("Email tidak ditemukan."); setLoading(false); return; }
+      if (newPass.length < 6) { setError("Password baru minimal 6 karakter."); setLoading(false); return; }
+      if (newPass !== confirm) { setError("Konfirmasi password tidak cocok."); setLoading(false); return; }
+      users[idx] = { ...users[idx], password: newPass };
+      saveUsers(users);
+      setSuccess("Password berhasil diubah!");
+      setLoading(false);
+      setTimeout(()=>{ closeForgot(); setTab("login"); }, 1500);
+    }, 500);
+  };
+
+  const TabBtn = ({id, label}) => (
+    <button onClick={()=>switchTab(id)}
+      className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-colors ${tab===id && !forgot ? "bg-blue-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+      {label}
+    </button>
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl shadow-lg mb-4">
-            <span className="text-3xl">📅</span>
+          <div className="flex justify-center mb-5">
+            <svg width="140" height="42" viewBox="0 0 600 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path fillRule="evenodd" clipRule="evenodd" d="M401.541 5C418.312 5 433.686 11.9059 444.652 23.0202C455.725 34.1344 462.605 49.4569 462.605 66.2901C462.605 83.1234 455.725 98.5538 444.652 109.56C433.578 120.674 418.312 127.58 401.541 127.58C384.77 127.58 369.396 120.674 358.43 109.56C347.357 98.4459 340.477 83.1234 340.477 66.2901C340.477 49.4569 347.357 34.0265 358.43 23.0202C369.504 11.9059 384.77 5 401.541 5ZM401.541 37.3716C393.585 37.3716 386.382 40.6087 381.222 45.8961C375.954 51.1834 372.729 58.4131 372.729 66.2901C372.729 74.2751 375.954 81.5048 381.222 86.6842C386.49 91.9716 393.693 95.2088 401.541 95.2088C409.497 95.2088 416.7 91.9716 421.86 86.6842C427.128 81.3969 430.353 74.1672 430.353 66.2901C430.353 58.3052 427.128 51.0755 421.86 45.8961C416.7 40.6087 409.497 37.3716 401.541 37.3716Z" fill="url(#lg0)"/>
+              <path fillRule="evenodd" clipRule="evenodd" d="M278.122 111.395C278.122 120.351 270.919 127.58 261.996 127.58C255.868 127.58 250.6 124.127 247.805 119.164C238.774 124.559 228.239 127.58 216.95 127.58C200.179 127.58 184.806 120.674 173.84 109.56C162.766 98.4459 155.886 83.1234 155.886 66.2901C155.886 49.4569 162.766 34.0265 173.84 23.0202C184.913 11.9059 200.179 5 216.95 5C233.722 5 249.095 11.9059 260.061 23.0202C270.919 33.9186 277.692 48.9174 278.015 65.4269V65.5348V65.8585V65.9664V66.3981V66.8297V111.395H278.122ZM245.87 66.6139V65.8585C245.762 58.0894 242.537 50.9676 237.377 45.7882C232.109 40.5008 224.906 37.2637 217.058 37.2637C209.102 37.2637 201.899 40.5008 196.739 45.7882C191.471 51.0755 188.246 58.3052 188.246 66.1822C188.246 74.1672 191.471 81.3969 196.739 86.5763C202.007 91.8637 209.21 95.1008 217.058 95.1008C225.013 95.1008 232.216 91.8637 237.377 86.5763C242.537 81.5048 245.762 74.491 245.87 66.6139Z" fill="url(#lg1)"/>
+              <path fillRule="evenodd" clipRule="evenodd" d="M538.828 5C555.599 5 570.973 11.9059 582.046 23.0202C593.12 34.1344 600 49.4569 600 66.2901C600 83.1234 593.12 98.5538 582.046 109.56C570.973 120.674 555.707 127.58 538.936 127.58C522.164 127.58 506.791 120.674 495.825 109.56C484.752 98.4459 477.871 83.1234 477.871 66.2901C477.871 49.4569 484.752 34.0265 495.825 23.0202C506.683 11.9059 521.949 5 538.828 5ZM538.828 37.3716C530.873 37.3716 523.67 40.6087 518.509 45.8961C513.241 51.1834 510.016 58.4131 510.016 66.2901C510.016 74.2751 513.241 81.5048 518.509 86.6842C523.777 91.9716 530.98 95.2088 538.828 95.2088C546.784 95.2088 553.987 91.9716 559.147 86.6842C564.415 81.3969 567.64 74.1672 567.64 66.2901C567.64 58.3052 564.415 51.0755 559.147 45.8961C553.879 40.6087 546.676 37.3716 538.828 37.3716Z" fill="url(#lg2)"/>
+              <path fillRule="evenodd" clipRule="evenodd" d="M293.173 21.1858C293.173 12.2296 300.376 5 309.299 5C318.223 5 325.426 12.2296 325.426 21.1858C325.426 51.3992 325.533 81.3969 325.533 111.502C325.533 143.766 301.666 170.419 270.704 174.627C262.534 176.138 254.471 171.066 252.32 162.865C250.063 154.233 255.116 145.385 263.716 143.011L272.424 140.853C284.465 136.536 293.173 124.991 293.173 111.395C293.066 81.289 293.173 51.2913 293.173 21.1858Z" fill="url(#lg3)"/>
+              <path fillRule="evenodd" clipRule="evenodd" d="M140.835 111.61C140.835 120.566 133.632 127.796 124.709 127.796C115.786 127.796 108.583 120.566 108.583 111.61C108.583 91.7558 108.583 72.0091 108.583 52.2625C111.27 52.2625 113.958 52.2625 116.646 52.2625C118.581 52.2625 119.548 50.536 118.151 49.0253C111.915 41.6878 105.572 34.4581 99.337 27.1206C97.7244 24.9625 97.1869 25.3941 95.6818 27.1206C89.4463 34.4581 83.1034 41.6878 76.8679 49.0253C75.4704 50.6439 76.4379 52.2625 78.3731 52.2625C81.0607 52.2625 83.7484 52.2625 86.4361 52.2625C86.4361 72.117 86.5436 91.7558 86.5436 111.61C86.5436 120.566 79.3406 127.796 70.4175 127.796C61.4944 127.796 54.2913 120.566 54.2913 111.61C54.2913 97.6906 54.3989 83.8787 54.3989 70.0668C57.0865 70.0668 59.7742 70.0668 62.4619 70.0668C64.3971 70.0668 65.3646 68.3404 63.967 66.8297C57.7316 59.4921 51.3886 52.2625 45.1532 44.9249C43.5406 42.7668 43.003 43.1984 41.4979 44.9249C35.2625 52.2625 28.9195 59.4921 22.6841 66.8297C21.2865 68.4483 22.2541 70.0668 24.1892 70.0668C26.8769 70.0668 29.5646 70.0668 32.2523 70.0668V70.8222V111.61C32.2523 120.566 25.0493 127.796 16.1261 127.796C7.20301 127.796 0 120.566 0 111.61V48.3779C0 36.5083 4.83784 25.6099 12.6859 17.7328C20.534 9.85572 31.3922 5 43.3256 5C53.6463 5 63.107 8.66878 70.525 14.7115C77.943 8.66878 87.4037 5 97.7244 5C109.658 5 120.516 9.85572 128.364 17.7328C136.212 25.6099 141.05 36.5083 141.05 48.3779V111.61H140.835Z" fill="url(#lg4)"/>
+              <defs>
+                <linearGradient id="lg0" x1="401.584" y1="123.238" x2="401.584" y2="0.59207" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+                <linearGradient id="lg1" x1="217.014" y1="115.229" x2="217.014" y2="-7.41644" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+                <linearGradient id="lg2" x1="538.798" y1="119.678" x2="538.798" y2="-2.96815" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+                <linearGradient id="lg3" x1="288.653" y1="135.285" x2="288.653" y2="-4.24338" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="0.5009" stopColor="#57C1AA"/><stop offset="0.9669" stopColor="#96CE8A"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+                <linearGradient id="lg4" x1="70.397" y1="134.015" x2="70.397" y2="-7.48128" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              </defs>
+            </svg>
           </div>
-          <h1 className="text-2xl font-bold text-slate-800">RoomBook</h1>
-          <p className="text-slate-500 text-sm mt-1">Meeting Room Booking — Majoo</p>
+          <h1 className="text-2xl font-bold text-slate-800">Meeting Room Booking</h1>
+          <p className="text-slate-500 text-sm mt-1">Silakan masuk untuk melanjutkan</p>
         </div>
 
         <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
-          <h2 className="text-lg font-bold text-slate-700 mb-6">Masuk ke Akun Anda</h2>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Email</label>
-              <input type="email" required value={email} onChange={e => setEmail(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="email@majoo.id" />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Password</label>
-              <input type="password" required value={password} onChange={e => setPassword(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="••••••••" />
-            </div>
-            {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg px-3 py-2">⚠️ {error}</div>}
-            <button type="submit" disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm mt-2">
-              {loading ? "Memproses..." : "Masuk →"}
-            </button>
-          </form>
 
-          {/* Demo credentials hint */}
-          <div className="mt-6 p-3 bg-slate-50 rounded-lg border border-slate-100">
-            <p className="text-xs text-slate-500 font-semibold mb-2">Demo Akun:</p>
-            {USERS.map(u => (
-              <button key={u.id} onClick={() => { setEmail(u.email); setPassword(USER_PASSWORDS[u.email]); }}
-                className="block text-xs text-blue-600 hover:underline">
-                {u.name} — {u.email}
-              </button>
-            ))}
-          </div>
+          {/* ── LUPA PASSWORD overlay ── */}
+          {forgot ? (
+            <div>
+              <div className="flex items-center gap-2 mb-6">
+                <button onClick={closeForgot} className="text-slate-400 hover:text-slate-600 text-lg leading-none">←</button>
+                <h2 className="text-lg font-bold text-slate-700">Reset Password</h2>
+              </div>
+              {success && <div className="mb-4 bg-green-50 border border-green-200 text-green-700 text-sm rounded-lg px-3 py-2">✓ {success}</div>}
+              <form onSubmit={handleReset} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Email Terdaftar</label>
+                  <input type="email" required value={email} onChange={e=>setEmail(e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="email@majoo.id"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Password Baru</label>
+                  <input type="password" required value={newPass} onChange={e=>setNewPass(e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Min. 6 karakter"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Konfirmasi Password Baru</label>
+                  <input type="password" required value={confirm} onChange={e=>setConfirm(e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Ulangi password baru"/>
+                </div>
+                {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg px-3 py-2">⚠ {error}</div>}
+                <button type="submit" disabled={loading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                  {loading ? "Memproses..." : "Ubah Password"}
+                </button>
+              </form>
+            </div>
+          ) : (
+            <div>
+              {/* Tab switcher */}
+              <div className="flex gap-1 bg-slate-100 rounded-xl p-1 mb-6">
+                <TabBtn id="login"    label="Masuk"/>
+                <TabBtn id="register" label="Daftar"/>
+              </div>
+
+              {success && <div className="mb-4 bg-green-50 border border-green-200 text-green-700 text-sm rounded-lg px-3 py-2">✓ {success}</div>}
+
+              {/* ── LOGIN ── */}
+              {tab==="login" && (
+                <form onSubmit={handleLogin} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Email</label>
+                    <input type="email" required value={email} onChange={e=>setEmail(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="email@majoo.id"/>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Password</label>
+                      <button type="button" onClick={openForgot} className="text-xs text-blue-500 hover:text-blue-700 hover:underline">Lupa password?</button>
+                    </div>
+                    <input type="password" required value={password} onChange={e=>setPassword(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="••••••••"/>
+                  </div>
+                  {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg px-3 py-2">⚠ {error}</div>}
+                  <button type="submit" disabled={loading}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                    {loading ? "Memproses..." : "Masuk →"}
+                  </button>
+                </form>
+              )}
+
+              {/* ── REGISTER ── */}
+              {tab==="register" && (
+                <form onSubmit={handleRegister} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Nama Lengkap</label>
+                    <input type="text" required value={name} onChange={e=>setName(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Nama Anda"/>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Email</label>
+                    <input type="email" required value={email} onChange={e=>setEmail(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="email@majoo.id"/>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Password</label>
+                    <input type="password" required value={password} onChange={e=>setPassword(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Min. 6 karakter"/>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Konfirmasi Password</label>
+                    <input type="password" required value={confirm} onChange={e=>setConfirm(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Ulangi password"/>
+                  </div>
+                  {error && <div className="bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg px-3 py-2">⚠ {error}</div>}
+                  <button type="submit" disabled={loading}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl transition-colors shadow-sm">
+                    {loading ? "Mendaftar..." : "Daftar Sekarang"}
+                  </button>
+                  <p className="text-xs text-slate-400 text-center">Karyawan baru mendapat akses Employee untuk melihat kalender.</p>
+                </form>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-// ── ROOM SIDEBAR ──────────────────────────────────────────────────────────────
-function RoomSidebar({ rooms, selectedRooms, onToggleRoom }) {
+// ─── ROOM SIDEBAR ─────────────────────────────────────────────────────────────
+function RoomSidebar({ rooms, selectedRooms, onToggle }) {
   return (
     <aside className="w-60 min-w-[200px] bg-white border-r border-slate-200 flex flex-col h-full overflow-y-auto">
       <div className="p-4 border-b border-slate-100">
         <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Meeting Rooms</h2>
       </div>
       <div className="flex-1 p-3 space-y-2">
-        {rooms.map(room => {
-          const isSelected = selectedRooms.includes(room.id);
+        {rooms.map(room=>{
+          const on = selectedRooms.includes(room.id);
           return (
-            <button key={room.id} onClick={() => onToggleRoom(room.id)}
-              className={`w-full text-left rounded-xl p-3 border-2 transition-all ${isSelected ? "shadow-md" : "border-slate-100 bg-slate-50 opacity-60"}`}
-              style={isSelected ? { borderColor: room.colorHex, backgroundColor: room.colorHex + "12" } : {}}>
+            <button key={room.id} onClick={()=>onToggle(room.id)}
+              className={`w-full text-left rounded-xl p-3 border-2 transition-all ${on?"shadow-md":"border-slate-100 bg-slate-50 opacity-60"}`}
+              style={on?{borderColor:room.colorHex,backgroundColor:room.colorHex+"12"}:{}}>
               <div className="flex items-center gap-2 mb-1">
-                <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: room.colorHex }} />
+                <span className="w-3 h-3 rounded-full flex-shrink-0" style={{backgroundColor:room.colorHex}}/>
                 <span className="font-semibold text-sm text-slate-800 truncate">{room.name}</span>
               </div>
               <div className="text-xs text-slate-500 mb-2">👥 Maks. {room.capacity} orang</div>
               <div className="flex flex-wrap gap-1">
-                {room.facilities.map(f => (
+                {room.facilities.map(f=>(
                   <span key={f} className="text-xs bg-white rounded-full px-2 py-0.5 border border-slate-200 text-slate-600">
-                    {FACILITY_ICONS[f] || "•"} {f}
+                    {FACILITY_ICONS[f]||"•"} {f}
                   </span>
                 ))}
               </div>
@@ -228,133 +657,80 @@ function RoomSidebar({ rooms, selectedRooms, onToggleRoom }) {
         })}
       </div>
       <div className="p-3 border-t border-slate-100">
-        <div className="text-xs text-slate-400 text-center">{selectedRooms.length} dari {rooms.length} room ditampilkan</div>
+        <div className="text-xs text-slate-400 text-center">{selectedRooms.length} dari {rooms.length} room</div>
       </div>
     </aside>
   );
 }
 
-// ── SIDE-BY-SIDE LAYOUT ALGORITHM (Google Calendar style) ─────────────────────
-// Groups overlapping bookings and assigns column positions so they render side-by-side.
-function computeColumns(dayBookings) {
-  // Sort by start time
-  const sorted = [...dayBookings].sort((a, b) =>
-    timeToMinutes(a.startTime) - timeToMinutes(b.startTime)
-  );
-
-  // Assign each booking a { col, totalCols } via sweep-line
-  const columns = []; // columns[i] = end-time of last booking in that column
-
-  const result = sorted.map(b => {
-    const bStart = timeToMinutes(b.startTime);
-    const bEnd   = timeToMinutes(b.endTime);
-
-    // Find first column where this booking fits (no overlap)
-    let col = columns.findIndex(endTime => endTime <= bStart);
-    if (col === -1) { col = columns.length; columns.push(bEnd); }
-    else            { columns[col] = bEnd; }
-
-    return { ...b, col };
-  });
-
-  // Second pass: compute totalCols for each booking = max overlapping columns
-  return result.map(b => {
-    const bStart = timeToMinutes(b.startTime);
-    const bEnd   = timeToMinutes(b.endTime);
-    // Count how many bookings overlap with this one
-    const overlapping = result.filter(other => {
-      const oS = timeToMinutes(other.startTime), oE = timeToMinutes(other.endTime);
-      return bStart < oE && bEnd > oS;
-    });
-    const totalCols = Math.max(...overlapping.map(o => o.col)) + 1;
-    return { ...b, totalCols };
-  });
-}
-
-// ── BOOKING CHIP ──────────────────────────────────────────────────────────────
-function BookingChip({ booking, room, currentUser, onClick, col, totalCols }) {
-  const SLOT_H  = 56;
-  const start   = timeToMinutes(booking.startTime) - timeToMinutes("08:00");
-  const duration = timeToMinutes(booking.endTime) - timeToMinutes(booking.startTime);
-  const top     = (start / 60) * SLOT_H;
-  const height  = Math.max((duration / 60) * SLOT_H - 4, 24);
-  const isOwn   = booking.bookedById === currentUser?.id;
-
-  // Side-by-side positioning
-  const GAP      = 2; // px between chips
-  const widthPct = (1 / totalCols) * 100;
-  const leftPct  = (col / totalCols) * 100;
-
+// ─── BOOKING CHIP ─────────────────────────────────────────────────────────────
+function BookingChip({ booking, room, currentUser, col, totalCols, onClick }) {
+  const SLOT_H   = 56;
+  const start    = toMin(booking.startTime) - toMin("08:00");
+  const duration = toMin(booking.endTime)   - toMin(booking.startTime);
+  const top    = (start/60)*SLOT_H;
+  const height = Math.max((duration/60)*SLOT_H-4, 24);
+  const GAP    = 2;
+  const isOwn  = booking.bookedById === currentUser?.id;
   return (
-    <div
-      className="absolute rounded-lg px-2 py-1 booking-chip cursor-pointer shadow-sm hover:shadow-md hover:z-10 transition-shadow overflow-hidden"
+    <div className="absolute rounded-lg px-2 py-1 booking-chip cursor-pointer shadow-sm hover:shadow-md hover:z-10 transition-shadow overflow-hidden"
       style={{
-        top:             top + "px",
-        height:          height + "px",
-        left:            `calc(${leftPct}% + ${col === 0 ? 4 : GAP}px)`,
-        width:           `calc(${widthPct}% - ${col === 0 ? GAP + 4 : GAP * 2}px)`,
-        backgroundColor: room.colorHex + "22",
+        top:             top+"px", height:height+"px",
+        left:            `calc(${(col/totalCols)*100}% + ${col===0?4:GAP}px)`,
+        width:           `calc(${(1/totalCols)*100}% - ${col===0?GAP+4:GAP*2}px)`,
+        backgroundColor: room.colorHex+"22",
         borderLeft:      `3px solid ${room.colorHex}`,
         color:           room.colorHex,
       }}
-      onClick={() => onClick(booking)}
-    >
+      onClick={()=>onClick(booking)}>
       <div className="font-semibold truncate">{booking.title}</div>
-      {height > 36 && <div className="text-xs opacity-75 truncate">{booking.startTime}–{booking.endTime}</div>}
-      {height > 52 && isOwn && <div className="text-xs opacity-60 truncate">📌 Saya</div>}
+      {height>36 && <div className="text-xs opacity-75 truncate">{booking.startTime}–{booking.endTime}</div>}
+      {height>52 && isOwn && <div className="text-xs opacity-60 truncate">📌 Saya</div>}
     </div>
   );
 }
 
-// ── CALENDAR GRID ─────────────────────────────────────────────────────────────
+// ─── CALENDAR GRID ────────────────────────────────────────────────────────────
 function CalendarGrid({ weekDays, bookings, rooms, selectedRooms, currentUser, onSlotClick, onChipClick }) {
   return (
     <div className="flex-1 overflow-auto">
-      {/* Day headers */}
       <div className="sticky top-0 z-10 bg-white border-b border-slate-200 flex">
-        <div className="w-16 flex-shrink-0" />
-        {weekDays.map((day, i) => {
-          const isToday = day.toISOString().slice(0, 10) === todayStr(0);
+        <div className="w-16 flex-shrink-0"/>
+        {weekDays.map((day,i)=>{
+          const isToday = localDateStr(day)===todayStr();
           return (
-            <div key={i} className={`flex-1 text-center py-3 text-sm font-medium border-l border-slate-100 ${isToday ? "text-blue-600 bg-blue-50" : "text-slate-600"}`}>
-              <span className="text-xs font-normal text-slate-400 block">{day.toLocaleDateString("id-ID", { weekday: "short" })}</span>
-              <span className={`text-lg font-bold leading-tight ${isToday ? "bg-blue-600 text-white rounded-full w-8 h-8 flex items-center justify-center mx-auto" : ""}`}>{day.getDate()}</span>
+            <div key={i} className={`flex-1 text-center py-3 border-l border-slate-100 ${isToday?"text-blue-600 bg-blue-50":"text-slate-600"}`}>
+              <span className="text-xs font-normal text-slate-400 block">{day.toLocaleDateString("id-ID",{weekday:"short"})}</span>
+              <span className={`text-lg font-bold leading-tight ${isToday?"bg-blue-600 text-white rounded-full w-8 h-8 flex items-center justify-center mx-auto":""}`}>{day.getDate()}</span>
             </div>
           );
         })}
       </div>
-
-      {/* Time grid */}
       <div className="flex">
         <div className="w-16 flex-shrink-0">
-          {HOURS.map(h => (
+          {HOURS.map(h=>(
             <div key={h} className="h-14 flex items-start justify-end pr-2 pt-1">
               <span className="text-xs text-slate-400 font-medium">{h}</span>
             </div>
           ))}
         </div>
-        {weekDays.map((day, di) => {
-          const dateStr     = day.toISOString().slice(0, 10);
-          const isToday     = dateStr === todayStr(0);
-          const dayBookings = bookings.filter(b => b.date === dateStr && selectedRooms.includes(b.roomId));
-          // Compute side-by-side columns for this day
-          const laid        = computeColumns(dayBookings);
-
+        {weekDays.map((day,di)=>{
+          const dateStr = localDateStr(day);
+          const isToday = dateStr===todayStr();
+          const laid    = computeColumns(bookings.filter(b=>b.date===dateStr && selectedRooms.includes(b.roomId)));
           return (
-            <div key={di} className={`flex-1 border-l border-slate-100 relative ${isToday ? "bg-blue-50/30" : ""}`}
-              style={{ minHeight: HOURS.length * 56 + "px" }}>
-              {HOURS.map(h => (
-                <div key={h} className="h-14 border-b border-slate-100 time-slot" onClick={() => onSlotClick(dateStr, h)} />
+            <div key={di} className={`flex-1 border-l border-slate-100 relative ${isToday?"bg-blue-50/30":""}`}
+              style={{minHeight:HOURS.length*56+"px"}}>
+              {HOURS.map(h=>(
+                <div key={h} className="h-14 border-b border-slate-100 time-slot" onClick={()=>onSlotClick(dateStr,h)}/>
               ))}
               <div className="absolute inset-0 pointer-events-none">
-                {laid.map(b => {
-                  const room = rooms.find(r => r.id === b.roomId);
+                {laid.map(b=>{
+                  const room = rooms.find(r=>r.id===b.roomId);
                   return (
                     <div key={b.id} className="pointer-events-auto">
-                      <BookingChip
-                        booking={b} room={room} currentUser={currentUser}
-                        onClick={onChipClick} col={b.col} totalCols={b.totalCols}
-                      />
+                      <BookingChip booking={b} room={room} currentUser={currentUser}
+                        col={b.col} totalCols={b.totalCols} onClick={onChipClick}/>
                     </div>
                   );
                 })}
@@ -367,74 +743,59 @@ function CalendarGrid({ weekDays, bookings, rooms, selectedRooms, currentUser, o
   );
 }
 
-// ── BOOKING FORM MODAL ────────────────────────────────────────────────────────
+// ─── BOOKING FORM MODAL ───────────────────────────────────────────────────────
 function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, bookings, currentUser }) {
   const isEdit = !!initialData?.id;
-  const defaultForm = { roomId: rooms[0]?.id, title: "", date: todayStr(0), startTime: "09:00", endTime: "10:00", attendees: "", notes: "" };
-  const [form, setForm]         = useState(defaultForm);
+  const blank  = { roomId:rooms[0]?.id, title:"", date:todayStr(), startTime:"09:00", endTime:"10:00", attendees:"", notes:"" };
+  const [form,     setForm]     = useState(blank);
   const [conflict, setConflict] = useState(null);
 
-  useEffect(() => {
-    if (isOpen) {
-      setForm(initialData || defaultForm);
-      setConflict(null);
-    }
-  }, [isOpen, initialData]);
-
+  useEffect(()=>{ if(isOpen){ setForm(initialData||blank); setConflict(null); } },[isOpen,initialData]);
   if (!isOpen) return null;
 
-  const set = (k, v) => {
-    const updated = { ...form, [k]: v };
-    setForm(updated);
-    // Real-time conflict check
-    if (updated.roomId && updated.date && updated.startTime && updated.endTime) {
-      const conflicting = bookings.find(b => {
-        if (b.id === updated.id) return false;
-        if (b.roomId !== updated.roomId || b.date !== updated.date) return false;
-        const bS = timeToMinutes(b.startTime), bE = timeToMinutes(b.endTime);
-        const cS = timeToMinutes(updated.startTime), cE = timeToMinutes(updated.endTime);
-        return cS < bE && cE > bS;
-      });
-      setConflict(conflicting || null);
-    }
+  const set = (k,v) => {
+    const up = {...form,[k]:v};
+    setForm(up);
+    if (up.roomId && up.date && up.startTime && up.endTime)
+      setConflict(findConflict(bookings, up));
   };
 
-  const handleSubmit = (e) => {
+  const canEdit = !isEdit || initialData?.bookedById===currentUser?.id || currentUser?.role==="Admin";
+
+  const submit = e => {
     e.preventDefault();
     if (conflict) return;
-    onSave({ ...form, id: form.id || Date.now(), bookedById: currentUser?.id, bookedByName: currentUser?.name });
+    onSave({...form, id:form.id||Date.now(), bookedById:currentUser?.id, bookedByName:currentUser?.name, bookedByEmail:currentUser?.email});
   };
-
-  const canEdit = !isEdit || initialData?.bookedById === currentUser?.id || currentUser?.role === "Admin";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay bg-black/30">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
-          <h2 className="text-lg font-bold text-slate-800">{isEdit ? "✏️ Edit Booking" : "📅 Booking Baru"}</h2>
+          <h2 className="text-lg font-bold text-slate-800">{isEdit?"✏️ Edit Booking":"📅 Booking Baru"}</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
+        <form onSubmit={submit} className="p-6 space-y-4">
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
           {/* Title */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Nama Meeting *</label>
             <input type="text" required placeholder="cth. Sprint Planning" value={form.title}
-              onChange={e => set("title", e.target.value)} disabled={!canEdit}
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50" />
+              onChange={e=>set("title",e.target.value)} disabled={!canEdit}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
           </div>
 
           {/* Room */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Pilih Room *</label>
             <div className="grid grid-cols-2 gap-2">
-              {rooms.map(room => (
+              {rooms.map(room=>(
                 <button type="button" key={room.id} disabled={!canEdit}
-                  onClick={() => set("roomId", room.id)}
-                  className={`text-left rounded-lg p-2.5 border-2 transition-all text-sm disabled:cursor-not-allowed ${form.roomId === room.id ? "shadow-md" : "border-slate-100 bg-slate-50"}`}
-                  style={form.roomId === room.id ? { borderColor: room.colorHex, backgroundColor: room.colorHex + "12" } : {}}>
+                  onClick={()=>set("roomId",room.id)}
+                  className={`text-left rounded-lg p-2.5 border-2 transition-all text-sm ${form.roomId===room.id?"shadow-md":"border-slate-100 bg-slate-50"}`}
+                  style={form.roomId===room.id?{borderColor:room.colorHex,backgroundColor:room.colorHex+"12"}:{}}>
                   <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: room.colorHex }} />
+                    <span className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:room.colorHex}}/>
                     <span className="font-semibold text-slate-800">{room.name}</span>
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">👥 {room.capacity} orang</div>
@@ -447,29 +808,26 @@ function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, b
           <div className="grid grid-cols-3 gap-3">
             <div className="col-span-3 sm:col-span-1">
               <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Tanggal *</label>
-              <input type="date" required value={form.date} onChange={e => set("date", e.target.value)} disabled={!canEdit}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50" />
+              <input type="date" required value={form.date} onChange={e=>set("date",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Mulai *</label>
-              <input type="time" required value={form.startTime} onChange={e => set("startTime", e.target.value)} disabled={!canEdit}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50" />
+              <input type="time" required value={form.startTime} onChange={e=>set("startTime",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Selesai *</label>
-              <input type="time" required value={form.endTime} onChange={e => set("endTime", e.target.value)} disabled={!canEdit}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50" />
+              <input type="time" required value={form.endTime} onChange={e=>set("endTime",e.target.value)} disabled={!canEdit}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
             </div>
           </div>
 
-          {/* Conflict Warning */}
+          {/* Conflict warning */}
           {conflict && (
             <div className="bg-red-50 border border-red-300 rounded-lg px-4 py-3 text-sm text-red-700 flex items-start gap-2">
               <span className="text-lg flex-shrink-0">⚠️</span>
-              <div>
-                <strong>Konflik Jadwal!</strong> Room ini sudah dibooking untuk <strong>"{conflict.title}"</strong> pukul {conflict.startTime}–{conflict.endTime} oleh {conflict.bookedByName || "pengguna lain"}.
-                Silakan pilih waktu atau room yang berbeda.
-              </div>
+              <div><strong>Konflik Jadwal!</strong> Room sudah dibooking untuk <strong>"{conflict.title}"</strong> pukul {conflict.startTime}–{conflict.endTime} oleh {conflict.bookedByName||"pengguna lain"}.</div>
             </div>
           )}
 
@@ -477,16 +835,16 @@ function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, b
           <div>
             <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Peserta</label>
             <input type="text" placeholder="cth. Tim Product, Budi, +3" value={form.attendees}
-              onChange={e => set("attendees", e.target.value)} disabled={!canEdit}
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50" />
+              onChange={e=>set("attendees",e.target.value)} disabled={!canEdit}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50"/>
           </div>
 
           {/* Notes */}
           <div>
             <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wider">Catatan</label>
-            <textarea placeholder="Catatan opsional..." value={form.notes} onChange={e => set("notes", e.target.value)}
+            <textarea placeholder="Catatan opsional..." value={form.notes} onChange={e=>set("notes",e.target.value)}
               rows={2} disabled={!canEdit}
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:bg-slate-50" />
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none disabled:bg-slate-50"/>
           </div>
 
           {!canEdit && (
@@ -494,32 +852,24 @@ function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, b
               🔒 Hanya pembuat booking atau Admin yang bisa mengedit.
             </div>
           )}
-
-          {/* Booked by */}
           {isEdit && initialData?.bookedByName && (
-            <div className="text-xs text-slate-400 flex items-center gap-1">
-              <span>👤 Dibooking oleh:</span>
-              <span className="font-medium text-slate-600">{initialData.bookedByName}</span>
-            </div>
+            <div className="text-xs text-slate-400">👤 Dibooking oleh: <span className="font-medium text-slate-600">{initialData.bookedByName}</span></div>
           )}
 
-          {/* Actions */}
           <div className="flex gap-2 pt-1">
             {isEdit && canEdit && (
-              <button type="button" onClick={() => onDelete(form.id)}
-                className="px-4 py-2 rounded-lg border border-red-200 text-red-500 text-sm font-medium hover:bg-red-50 transition-colors">
+              <button type="button" onClick={()=>onDelete(form.id)}
+                className="px-4 py-2 rounded-lg border border-red-200 text-red-500 text-sm font-medium hover:bg-red-50">
                 🗑 Hapus
               </button>
             )}
-            <div className="flex-1" />
+            <div className="flex-1"/>
             <button type="button" onClick={onClose}
-              className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50 transition-colors">
-              Batal
-            </button>
+              className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50">Batal</button>
             {canEdit && (
               <button type="submit" disabled={!!conflict}
-                className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm">
-                {isEdit ? "Simpan" : "Booking Sekarang"}
+                className="px-5 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+                {isEdit?"Simpan":"Booking Sekarang"}
               </button>
             )}
           </div>
@@ -529,222 +879,313 @@ function BookingModal({ isOpen, onClose, onSave, onDelete, rooms, initialData, b
   );
 }
 
-// ── BOOKING DETAIL MODAL ──────────────────────────────────────────────────────
-function BookingDetailModal({ booking, room, onClose, onEdit }) {
+// ─── BOOKING DETAIL MODAL ─────────────────────────────────────────────────────
+function DetailModal({ booking, room, onClose, onEdit, onCancel, currentUser }) {
   if (!booking) return null;
+
+  // Cek apakah user yang login adalah pemilik booking
+  const isOwner = (() => {
+    if (!currentUser) return false;
+    // Booking dari Google Form — cocokkan via email (paling akurat)
+    if (booking.source === "google-form") {
+      if (booking.bookedByEmail && booking.bookedByEmail === currentUser.email) return true;
+      // Jika tidak ada email tersimpan, tidak bisa diklaim kepemilikannya
+      return false;
+    }
+    // Booking dari app langsung — cocokkan via id atau email
+    if (booking.bookedById && booking.bookedById === currentUser.id) return true;
+    if (booking.bookedByEmail && booking.bookedByEmail === currentUser.email) return true;
+    return false;
+  })();
+
+  const rows = [
+    {icon:"🏢",label:"Room",   val:room.name},
+    {icon:"📅",label:"Tanggal",val:new Date(booking.date+"T00:00").toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"})},
+    {icon:"🕐",label:"Waktu",  val:`${booking.startTime} – ${booking.endTime}`},
+    booking.attendees    && {icon:"👥",label:"Peserta",        val:booking.attendees},
+    booking.bookedByName && {icon:"👤",label:"Dibooking oleh", val:booking.bookedByName},
+    booking.notes        && {icon:"📝",label:"Catatan",        val:booking.notes},
+  ].filter(Boolean);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay bg-black/30">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
-        <div className="h-2" style={{ backgroundColor: room.colorHex }} />
+        <div className="h-2" style={{backgroundColor:room.colorHex}}/>
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
           <h2 className="text-base font-bold text-slate-800">{booking.title}</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div className="p-6 space-y-3 text-sm">
-          {[
-            { icon: "🏢", label: "Room", val: room.name },
-            { icon: "📅", label: "Tanggal", val: new Date(booking.date + "T00:00").toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) },
-            { icon: "🕐", label: "Waktu", val: `${booking.startTime} – ${booking.endTime}` },
-            booking.attendees && { icon: "👥", label: "Peserta", val: booking.attendees },
-            booking.bookedByName && { icon: "👤", label: "Dibooking oleh", val: booking.bookedByName },
-            booking.notes && { icon: "📝", label: "Catatan", val: booking.notes },
-          ].filter(Boolean).map(row => (
-            <div key={row.label} className="flex items-start gap-3">
-              <span className="w-8 text-center text-base flex-shrink-0">{row.icon}</span>
-              <div>
-                <div className="font-medium text-slate-700">{row.val}</div>
-                <div className="text-xs text-slate-400">{row.label}</div>
-              </div>
+          {rows.map(r=>(
+            <div key={r.label} className="flex items-start gap-3">
+              <span className="w-8 text-center text-base flex-shrink-0">{r.icon}</span>
+              <div><div className="font-medium text-slate-700">{r.val}</div><div className="text-xs text-slate-400">{r.label}</div></div>
             </div>
           ))}
         </div>
+
+        {/* Pesan tidak bisa batalkan — tampil untuk Employee yang bukan pemilik */}
+        {currentUser?.role !== "Admin" && !isOwner && (
+          <div className="mx-6 mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800">
+            Booking ini milik <strong>{booking.bookedByName || "karyawan lain"}</strong>. Hanya pemilik booking yang dapat membatalkannya.
+          </div>
+        )}
+
         <div className="px-6 pb-5 flex gap-2">
-          <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50 transition-colors">Tutup</button>
-          <button onClick={() => onEdit(booking)} className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors">✏️ Edit</button>
+          <button onClick={onClose} className="flex-1 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm font-medium hover:bg-slate-50">Tutup</button>
+          {currentUser?.role === "Admin" ? (
+            <button onClick={()=>onEdit(booking)} className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700">Edit</button>
+          ) : isOwner ? (
+            <button onClick={()=>{ if(window.confirm("Batalkan booking ini?")) onCancel(booking.id); }}
+              className="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-semibold hover:bg-red-600">
+              Batalkan Booking
+            </button>
+          ) : null}
         </div>
       </div>
     </div>
   );
 }
 
-// ── NOTIFICATION LOG PANEL ────────────────────────────────────────────────────
-function NotificationPanel({ logs, onClose }) {
+// ─── NOTIF PANEL ──────────────────────────────────────────────────────────────
+function NotifPanel({ logs, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end modal-overlay bg-black/20">
       <div className="w-full max-w-sm bg-white shadow-2xl flex flex-col h-full">
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-          <h2 className="font-bold text-slate-800">🔔 Notifikasi</h2>
+          <h2 className="font-bold text-slate-800">🔔 Riwayat Booking</h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {logs.length === 0 ? (
-            <div className="text-center text-slate-400 text-sm py-10">Belum ada notifikasi</div>
-          ) : [...logs].reverse().map(log => (
-            <div key={log.id} className="bg-slate-50 border border-slate-100 rounded-xl p-3">
-              <div className="flex items-start gap-2">
-                <span className="text-lg flex-shrink-0">{log.icon}</span>
-                <div>
-                  <div className="font-semibold text-sm text-slate-800">{log.title}</div>
-                  <div className="text-xs text-slate-500 mt-0.5">{log.message}</div>
-                  <div className="text-xs text-slate-400 mt-1">{log.channel} · {new Date(log.ts).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}</div>
+          {logs.length===0
+            ? <div className="text-center text-slate-400 text-sm py-10">Belum ada aktivitas</div>
+            : [...logs].reverse().map(log=>(
+              <div key={log.id} className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+                <div className="flex items-start gap-2">
+                  <span className="text-lg flex-shrink-0">{log.icon}</span>
+                  <div>
+                    <div className="font-semibold text-sm text-slate-800">{log.title}</div>
+                    <div className="text-xs text-slate-500 mt-0.5">{log.message}</div>
+                    <div className="text-xs text-slate-400 mt-1">{new Date(log.ts).toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit"})}</div>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))
+          }
         </div>
       </div>
     </div>
   );
 }
 
-// ── MAIN APP ──────────────────────────────────────────────────────────────────
-const INITIAL_BOOKINGS = [
-  { id: 1, roomId: 1, title: "Q2 Planning",        date: todayStr(0), startTime: "09:00", endTime: "10:30", attendees: "Product Team",     notes: "", bookedById: 1, bookedByName: "Zulfikar Dwi" },
-  { id: 2, roomId: 2, title: "1-on-1 Review",      date: todayStr(0), startTime: "11:00", endTime: "12:00", attendees: "HR + Zulfikar",    notes: "", bookedById: 2, bookedByName: "Firjayanti" },
-  { id: 3, roomId: 3, title: "Design Workshop",    date: todayStr(1), startTime: "14:00", endTime: "16:00", attendees: "Design Team",      notes: "Bawa prototype", bookedById: 1, bookedByName: "Zulfikar Dwi" },
-  { id: 4, roomId: 1, title: "Investor Call",      date: todayStr(2), startTime: "10:00", endTime: "11:00", attendees: "Exec Team",        notes: "Confidential", bookedById: 2, bookedByName: "Firjayanti" },
-  { id: 5, roomId: 4, title: "Team Lunch Meeting", date: todayStr(3), startTime: "12:00", endTime: "13:00", attendees: "All Hands",        notes: "", bookedById: 2, bookedByName: "Firjayanti" },
-];
-
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 function App() {
-  const [currentUser, setCurrentUser]     = useState(null);
-  const [bookings, setBookings]           = useState(INITIAL_BOOKINGS);
-  const [selectedRooms, setSelectedRooms] = useState(ROOMS.map(r => r.id));
-  const [baseDate, setBaseDate]           = useState(new Date());
-  const [modalOpen, setModalOpen]         = useState(false);
-  const [modalInit, setModalInit]         = useState(null);
-  const [detailBooking, setDetailBooking] = useState(null);
-  const [notifOpen, setNotifOpen]         = useState(false);
-  const [notifLogs, setNotifLogs]         = useState([]);
-  const { toasts, addToast }              = useToast();
+  const [currentUser,    setCurrentUser]    = useState(()=>loadSession());
+  const [bookings,       setBookings]       = useState(()=>loadBookings());
+  const [selectedRooms,  setSelectedRooms]  = useState(ROOMS.map(r=>r.id));
+  const [baseDate,       setBaseDate]       = useState(new Date());
+  const [modalOpen,      setModalOpen]      = useState(false);
+  const [modalInit,      setModalInit]      = useState(null);
+  const [detailBooking,  setDetailBooking]  = useState(null);
+  const [notifOpen,      setNotifOpen]      = useState(false);
+  const [notifLogs,      setNotifLogs]      = useState([]);
+  const [syncing,        setSyncing]        = useState(false);
+  const { toasts, add: addToast }           = useToast();
 
-  const weekDays = useMemo(() => getWeekDays(baseDate), [baseDate]);
+  const weekDays = useMemo(()=>getWeekDays(baseDate),[baseDate]);
 
-  // Simulate sending email notification
-  const sendNotification = (type, booking) => {
-    const room = ROOMS.find(r => r.id === booking.roomId);
-    const icons = { create: "✅", update: "✏️", delete: "🗑️" };
-    const titles = { create: "Booking Berhasil", update: "Booking Diperbarui", delete: "Booking Dihapus" };
-    const entry = {
-      id: Date.now(),
-      ts: Date.now(),
-      icon: icons[type],
-      title: titles[type],
-      message: `"${booking.title}" — ${room?.name} · ${booking.date} · ${booking.startTime}–${booking.endTime}`,
-      channel: "📧 Email (simulated)",
-    };
-    setNotifLogs(prev => [...prev, entry]);
-    addToast({ icon: icons[type], title: titles[type], message: `${booking.title} di ${room?.name}`, color: room?.colorHex });
+  // Persist bookings ke localStorage setiap kali berubah
+  useEffect(()=>saveBookings(bookings),[bookings]);
+
+  // Sync dari Google Sheet saat pertama login / saat app load
+  const doSync = useCallback(async () => {
+    setSyncing(true);
+    try {
+      const sheetData = await syncFromSheet();
+      if (sheetData.length > 0) {
+        setBookings(prev => {
+          const beforeCount  = prev.filter(b => b.source === "google-form").length;
+          const merged       = mergeBookings(sheetData, prev);
+          const afterCount   = merged.filter(b => b.source === "google-form").length;
+          const rejectedCount = sheetData.length - afterCount;
+          saveBookings(merged);
+
+          if (rejectedCount > 0) {
+            setTimeout(() => addToast({
+              icon:"⛔", title:"Booking Ditolak",
+              message:`${rejectedCount} booking dari form ditolak karena bentrok jadwal`,
+              color:"#ef4444"
+            }), 300);
+          }
+          return merged;
+        });
+        addToast({ icon:"🔄", title:"Sinkronisasi Selesai", message:`${sheetData.length} booking dari Google Form diproses`, color:"#10b981" });
+      } else {
+        addToast({ icon:"🔄", title:"Sinkronisasi Selesai", message:"Tidak ada booking baru dari Google Form", color:"#6b7280" });
+      }
+    } catch(e) {
+      console.warn("Sync error:", e);
+    }
+    setSyncing(false);
+  }, []);
+
+  // Auto-sync saat app pertama dibuka (jika sudah login)
+  useEffect(()=>{ if (currentUser) doSync(); },[currentUser]);
+
+  const login = user => { saveSession(user); setCurrentUser(user); };
+  const logout = () => { saveSession(null); setCurrentUser(null); };
+
+  const notify = (type, booking) => {
+    const room  = ROOMS.find(r=>r.id===booking.roomId);
+    const icons = {create:"✅",update:"✏️",delete:"🗑️"};
+    const titles= {create:"Booking Berhasil",update:"Booking Diperbarui",delete:"Booking Dihapus"};
+    const entry = {id:Date.now(),ts:Date.now(),icon:icons[type],title:titles[type],
+      message:`"${booking.title}" — ${room?.name} · ${booking.date} · ${booking.startTime}–${booking.endTime}`};
+    setNotifLogs(p=>[...p,entry]);
+    addToast({icon:icons[type],title:titles[type],message:`${booking.title} di ${room?.name}`,color:room?.colorHex});
   };
 
-  const toggleRoom = id => setSelectedRooms(prev =>
-    prev.includes(id) ? (prev.length > 1 ? prev.filter(r => r !== id) : prev) : [...prev, id]
+  const toggleRoom = id => setSelectedRooms(p=>
+    p.includes(id) ? (p.length>1 ? p.filter(r=>r!==id) : p) : [...p,id]
   );
 
-  const prevWeek = () => { const d = new Date(baseDate); d.setDate(d.getDate() - 7); setBaseDate(d); };
-  const nextWeek = () => { const d = new Date(baseDate); d.setDate(d.getDate() + 7); setBaseDate(d); };
-  const goToday  = () => setBaseDate(new Date());
+  const prevWeek = ()=>{ const d=new Date(baseDate); d.setDate(d.getDate()-7); setBaseDate(d); };
+  const nextWeek = ()=>{ const d=new Date(baseDate); d.setDate(d.getDate()+7); setBaseDate(d); };
 
   const openNew = (date, startTime) => {
-    setModalInit({ roomId: selectedRooms[0] || ROOMS[0].id, title: "", date: date || todayStr(0), startTime: startTime || "09:00", endTime: startTime ? addHour(startTime) : "10:00", attendees: "", notes: "" });
+    setModalInit({roomId:selectedRooms[0]||ROOMS[0].id,title:"",date:date||todayStr(),
+      startTime:startTime||"09:00",endTime:startTime?addHour(startTime):"10:00",attendees:"",notes:""});
     setModalOpen(true);
   };
-  const openEdit = (booking) => { setDetailBooking(null); setModalInit({ ...booking }); setModalOpen(true); };
+  const openEdit = b => { setDetailBooking(null); setModalInit({...b}); setModalOpen(true); };
 
-  const handleSave = (data) => {
-    const isEdit = bookings.some(b => b.id === data.id);
-    setBookings(prev => isEdit ? prev.map(b => b.id === data.id ? data : b) : [...prev, data]);
+  const handleSave = data => {
+    const isEdit = bookings.some(b=>b.id===data.id);
+    setBookings(p=>isEdit ? p.map(b=>b.id===data.id?data:b) : [...p,data]);
     setModalOpen(false);
-    sendNotification(isEdit ? "update" : "create", data);
+    notify(isEdit?"update":"create", data);
   };
 
-  const handleDelete = (id) => {
-    const booking = bookings.find(b => b.id === id);
-    setBookings(prev => prev.filter(b => b.id !== id));
-    setModalOpen(false);
-    if (booking) sendNotification("delete", booking);
+  const handleCancel = id => {
+    addCancelledId(id);
+    setBookings(p => p.filter(b => String(b.id) !== String(id)));
+    setDetailBooking(null);
+    addToast({ icon:"🚫", title:"Booking Dibatalkan", message:"Booking telah dihapus dan tidak akan muncul lagi.", color:"#ef4444" });
   };
 
-  const todayBookings = bookings.filter(b => b.date === todayStr(0)).length;
-  const unreadNotifs  = notifLogs.length;
+  const handleDelete = id => {
+    addCancelledId(id);
+    const b = bookings.find(b=>b.id===id);
+    setBookings(p=>p.filter(b=>b.id!==id));
+    setModalOpen(false);
+    if (b) notify("delete", b);
+  };
 
-  if (!currentUser) return <LoginScreen onLogin={setCurrentUser} />;
+  if (!currentUser) return <LoginScreen onLogin={login}/>;
+
+  const todayCount = bookings.filter(b=>b.date===todayStr()).length;
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
-      {/* Top Navbar */}
+      {/* Navbar */}
       <header className="bg-white border-b border-slate-200 px-5 py-2.5 flex items-center gap-3 flex-shrink-0 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold">📅</div>
-          <div>
-            <div className="font-bold text-slate-800 leading-tight text-sm">RoomBook</div>
-            <div className="text-xs text-slate-400 leading-tight">Majoo</div>
-          </div>
+        <div className="flex items-center gap-2.5">
+          <svg width="80" height="24" viewBox="0 0 600 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path fillRule="evenodd" clipRule="evenodd" d="M401.541 5C418.312 5 433.686 11.9059 444.652 23.0202C455.725 34.1344 462.605 49.4569 462.605 66.2901C462.605 83.1234 455.725 98.5538 444.652 109.56C433.578 120.674 418.312 127.58 401.541 127.58C384.77 127.58 369.396 120.674 358.43 109.56C347.357 98.4459 340.477 83.1234 340.477 66.2901C340.477 49.4569 347.357 34.0265 358.43 23.0202C369.504 11.9059 384.77 5 401.541 5ZM401.541 37.3716C393.585 37.3716 386.382 40.6087 381.222 45.8961C375.954 51.1834 372.729 58.4131 372.729 66.2901C372.729 74.2751 375.954 81.5048 381.222 86.6842C386.49 91.9716 393.693 95.2088 401.541 95.2088C409.497 95.2088 416.7 91.9716 421.86 86.6842C427.128 81.3969 430.353 74.1672 430.353 66.2901C430.353 58.3052 427.128 51.0755 421.86 45.8961C416.7 40.6087 409.497 37.3716 401.541 37.3716Z" fill="url(#hlg0)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M278.122 111.395C278.122 120.351 270.919 127.58 261.996 127.58C255.868 127.58 250.6 124.127 247.805 119.164C238.774 124.559 228.239 127.58 216.95 127.58C200.179 127.58 184.806 120.674 173.84 109.56C162.766 98.4459 155.886 83.1234 155.886 66.2901C155.886 49.4569 162.766 34.0265 173.84 23.0202C184.913 11.9059 200.179 5 216.95 5C233.722 5 249.095 11.9059 260.061 23.0202C270.919 33.9186 277.692 48.9174 278.015 65.4269V65.5348V65.8585V65.9664V66.3981V66.8297V111.395H278.122ZM245.87 66.6139V65.8585C245.762 58.0894 242.537 50.9676 237.377 45.7882C232.109 40.5008 224.906 37.2637 217.058 37.2637C209.102 37.2637 201.899 40.5008 196.739 45.7882C191.471 51.0755 188.246 58.3052 188.246 66.1822C188.246 74.1672 191.471 81.3969 196.739 86.5763C202.007 91.8637 209.21 95.1008 217.058 95.1008C225.013 95.1008 232.216 91.8637 237.377 86.5763C242.537 81.5048 245.762 74.491 245.87 66.6139Z" fill="url(#hlg1)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M538.828 5C555.599 5 570.973 11.9059 582.046 23.0202C593.12 34.1344 600 49.4569 600 66.2901C600 83.1234 593.12 98.5538 582.046 109.56C570.973 120.674 555.707 127.58 538.936 127.58C522.164 127.58 506.791 120.674 495.825 109.56C484.752 98.4459 477.871 83.1234 477.871 66.2901C477.871 49.4569 484.752 34.0265 495.825 23.0202C506.683 11.9059 521.949 5 538.828 5ZM538.828 37.3716C530.873 37.3716 523.67 40.6087 518.509 45.8961C513.241 51.1834 510.016 58.4131 510.016 66.2901C510.016 74.2751 513.241 81.5048 518.509 86.6842C523.777 91.9716 530.98 95.2088 538.828 95.2088C546.784 95.2088 553.987 91.9716 559.147 86.6842C564.415 81.3969 567.64 74.1672 567.64 66.2901C567.64 58.3052 564.415 51.0755 559.147 45.8961C553.879 40.6087 546.676 37.3716 538.828 37.3716Z" fill="url(#hlg2)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M293.173 21.1858C293.173 12.2296 300.376 5 309.299 5C318.223 5 325.426 12.2296 325.426 21.1858C325.426 51.3992 325.533 81.3969 325.533 111.502C325.533 143.766 301.666 170.419 270.704 174.627C262.534 176.138 254.471 171.066 252.32 162.865C250.063 154.233 255.116 145.385 263.716 143.011L272.424 140.853C284.465 136.536 293.173 124.991 293.173 111.395C293.066 81.289 293.173 51.2913 293.173 21.1858Z" fill="url(#hlg3)"/>
+            <path fillRule="evenodd" clipRule="evenodd" d="M140.835 111.61C140.835 120.566 133.632 127.796 124.709 127.796C115.786 127.796 108.583 120.566 108.583 111.61C108.583 91.7558 108.583 72.0091 108.583 52.2625C111.27 52.2625 113.958 52.2625 116.646 52.2625C118.581 52.2625 119.548 50.536 118.151 49.0253C111.915 41.6878 105.572 34.4581 99.337 27.1206C97.7244 24.9625 97.1869 25.3941 95.6818 27.1206C89.4463 34.4581 83.1034 41.6878 76.8679 49.0253C75.4704 50.6439 76.4379 52.2625 78.3731 52.2625C81.0607 52.2625 83.7484 52.2625 86.4361 52.2625C86.4361 72.117 86.5436 91.7558 86.5436 111.61C86.5436 120.566 79.3406 127.796 70.4175 127.796C61.4944 127.796 54.2913 120.566 54.2913 111.61C54.2913 97.6906 54.3989 83.8787 54.3989 70.0668C57.0865 70.0668 59.7742 70.0668 62.4619 70.0668C64.3971 70.0668 65.3646 68.3404 63.967 66.8297C57.7316 59.4921 51.3886 52.2625 45.1532 44.9249C43.5406 42.7668 43.003 43.1984 41.4979 44.9249C35.2625 52.2625 28.9195 59.4921 22.6841 66.8297C21.2865 68.4483 22.2541 70.0668 24.1892 70.0668C26.8769 70.0668 29.5646 70.0668 32.2523 70.0668V70.8222V111.61C32.2523 120.566 25.0493 127.796 16.1261 127.796C7.20301 127.796 0 120.566 0 111.61V48.3779C0 36.5083 4.83784 25.6099 12.6859 17.7328C20.534 9.85572 31.3922 5 43.3256 5C53.6463 5 63.107 8.66878 70.525 14.7115C77.943 8.66878 87.4037 5 97.7244 5C109.658 5 120.516 9.85572 128.364 17.7328C136.212 25.6099 141.05 36.5083 141.05 48.3779V111.61H140.835Z" fill="url(#hlg4)"/>
+            <defs>
+              <linearGradient id="hlg0" x1="401.584" y1="123.238" x2="401.584" y2="0.59207" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg1" x1="217.014" y1="115.229" x2="217.014" y2="-7.41644" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg2" x1="538.798" y1="119.678" x2="538.798" y2="-2.96815" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg3" x1="288.653" y1="135.285" x2="288.653" y2="-4.24338" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="0.5009" stopColor="#57C1AA"/><stop offset="0.9669" stopColor="#96CE8A"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+              <linearGradient id="hlg4" x1="70.397" y1="134.015" x2="70.397" y2="-7.48128" gradientUnits="userSpaceOnUse"><stop stopColor="#2DBDB6"/><stop offset="0.27" stopColor="#2DBDB6"/><stop offset="1" stopColor="#9ACF87"/></linearGradient>
+            </defs>
+          </svg>
+          <div className="w-px h-5 bg-slate-200"></div>
+          <div className="text-xs font-medium text-slate-500 leading-tight">Meeting Room</div>
         </div>
 
         <div className="flex items-center gap-1.5 ml-1">
           <button onClick={prevWeek} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">◀</button>
-          <button onClick={goToday} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50">Hari Ini</button>
+          <button onClick={()=>setBaseDate(new Date())} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:bg-slate-50">Hari Ini</button>
           <button onClick={nextWeek} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">▶</button>
-          <span className="text-sm font-semibold text-slate-700 ml-1">{formatMonthYear(weekDays[0])}</span>
+          <span className="text-sm font-semibold text-slate-700 ml-1">{fmtMonthYear(weekDays[0])}</span>
         </div>
 
         <div className="ml-auto flex items-center gap-2">
+          <button onClick={doSync} disabled={syncing}
+            className="hidden sm:flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-50 transition-colors"
+            title="Sinkronisasi dari Google Form">
+            {syncing ? (
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
+            ) : (
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M1 4v6h6M23 20v-6h-6"/>
+                <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
+              </svg>
+            )}
+            {syncing ? "Menyinkron..." : "Sync Form"}
+          </button>
           <div className="hidden sm:flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-600">
-            🗓 {todayBookings} booking hari ini
+            {todayCount} booking hari ini
           </div>
-
-          {/* Notification bell */}
-          <button onClick={() => setNotifOpen(true)} className="relative p-2 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors">
+          <button onClick={()=>setNotifOpen(true)} className="relative p-2 rounded-lg hover:bg-slate-100 text-slate-500">
             🔔
-            {unreadNotifs > 0 && (
+            {notifLogs.length>0 && (
               <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold leading-none">
-                {unreadNotifs > 9 ? "9+" : unreadNotifs}
+                {notifLogs.length>9?"9+":notifLogs.length}
               </span>
             )}
           </button>
-
-          {/* User avatar */}
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
             <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">{currentUser.avatar}</div>
             <span className="text-xs font-medium text-slate-700 hidden sm:block">{currentUser.name}</span>
             <span className="text-xs text-slate-400 hidden sm:block">·</span>
-            <button onClick={() => setCurrentUser(null)} className="text-xs text-red-400 hover:text-red-600 hidden sm:block">Keluar</button>
+            <span className="text-xs text-slate-400 hidden sm:block">{currentUser.role}</span>
+            <button onClick={logout} className="text-xs text-red-400 hover:text-red-600 hidden sm:block">Keluar</button>
           </div>
-
-          <button onClick={() => openNew()}
-            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-xl shadow-sm transition-colors">
-            <span className="text-base leading-none">+</span> Booking
-          </button>
+          {currentUser.role === "Admin" && (
+            <button onClick={()=>openNew()}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-xl shadow-sm transition-colors">
+              <span className="text-base leading-none">+</span> Booking
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Main layout */}
+      {/* Body */}
       <div className="flex flex-1 overflow-hidden">
-        <RoomSidebar rooms={ROOMS} selectedRooms={selectedRooms} onToggleRoom={toggleRoom} />
+        <RoomSidebar rooms={ROOMS} selectedRooms={selectedRooms} onToggle={toggleRoom}/>
         <main className="flex-1 flex flex-col overflow-hidden bg-white">
-          <CalendarGrid weekDays={weekDays} bookings={bookings} rooms={ROOMS} selectedRooms={selectedRooms}
-            currentUser={currentUser} onSlotClick={openNew} onChipClick={b => setDetailBooking(b)} />
+          <CalendarGrid weekDays={weekDays} bookings={bookings} rooms={ROOMS}
+            selectedRooms={selectedRooms} currentUser={currentUser}
+            onSlotClick={openNew} onChipClick={b=>setDetailBooking(b)}/>
         </main>
       </div>
 
       {/* Modals */}
-      <BookingModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSave={handleSave} onDelete={handleDelete}
-        rooms={ROOMS} initialData={modalInit} bookings={bookings} currentUser={currentUser} />
+      <BookingModal isOpen={modalOpen} onClose={()=>setModalOpen(false)}
+        onSave={handleSave} onDelete={handleDelete} rooms={ROOMS}
+        initialData={modalInit} bookings={bookings} currentUser={currentUser}/>
 
       {detailBooking && (
-        <BookingDetailModal booking={detailBooking} room={ROOMS.find(r => r.id === detailBooking.roomId)}
-          onClose={() => setDetailBooking(null)} onEdit={openEdit} />
+        <DetailModal booking={detailBooking} room={ROOMS.find(r=>r.id===detailBooking.roomId)}
+          onClose={()=>setDetailBooking(null)} onEdit={openEdit}
+          onCancel={handleCancel} currentUser={currentUser}/>
       )}
 
-      {notifOpen && <NotificationPanel logs={notifLogs} onClose={() => setNotifOpen(false)} />}
-
-      <ToastContainer toasts={toasts} />
+      {notifOpen && <NotifPanel logs={notifLogs} onClose={()=>setNotifOpen(false)}/>}
+      <ToastContainer toasts={toasts}/>
     </div>
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 </script>
 </body>
 </html>
